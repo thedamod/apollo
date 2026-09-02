@@ -1,0 +1,40 @@
+{
+  "name": "@home-server/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "home-server": "./dist/bin.mjs"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "dev": "tsx watch src/bin.ts --port 7070",
+    "build": "tsc --outDir dist --module NodeNext --target ES2022 --moduleResolution NodeNext --declaration false --sourceMap && cp src/bin.ts dist/bin.mjs && chmod +x dist/bin.mjs || true",
+    "build:bundle": "tsc --outDir dist --module NodeNext --target ES2022 --moduleResolution NodeNext --declaration false --sourceMap",
+    "start": "node dist/bin.mjs start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@home-server/contracts": "workspace:*",
+    "@home-server/shared": "workspace:*",
+    "@home-server/tailscale": "workspace:*",
+    "express": "^4.21.1",
+    "cors": "^2.8.5",
+    "ws": "^8.18.0",
+    "zod": "catalog:",
+    "node-pty": "catalog:"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/cors": "^2.8.17",
+    "@types/ws": "^8.5.13",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "catalog:",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20.12.0"
+  }
+}

@@ -4,14 +4,13 @@
   "private": true,
   "type": "module",
   "bin": {
-    "home-server": "./dist/bin.mjs"
+    "home-server": "./dist/bin.js"
   },
   "files": ["dist"],
   "scripts": {
     "dev": "tsx watch src/bin.ts --port 7070",
-    "build": "tsc --outDir dist --module NodeNext --target ES2022 --moduleResolution NodeNext --declaration false --sourceMap && cp src/bin.ts dist/bin.mjs && chmod +x dist/bin.mjs || true",
-    "build:bundle": "tsc --outDir dist --module NodeNext --target ES2022 --moduleResolution NodeNext --declaration false --sourceMap",
-    "start": "node dist/bin.mjs start",
+    "build": "tsc",
+    "start": "node dist/bin.js start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

@@ -1,0 +1,18 @@
+{
+  "name": "@home-server/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "types": "./src/index.ts", "import": "./src/index.ts" },
+    "./path": { "types": "./src/path.ts", "import": "./src/path.ts" },
+    "./shell": { "types": "./src/shell.ts", "import": "./src/shell.ts" },
+    "./terminalLabels": { "types": "./src/terminalLabels.ts", "import": "./src/terminalLabels.ts" }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

@@ -1,0 +1,142 @@
+/**
+ * RPC registry — single source of truth for method names, payloads and streaming.
+ * Wire format: JSON over WebSocket:
+ *  client -> { id, method, params }
+ *  server -> { id, result } | { id, error: { code, message } }
+ *  server -> { type:"event", channel, payload }  // subscriptions
+ */
+import { z } from "zod";
+
+import { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
+import {
+  TerminalOpenInput,
+  TerminalAttachInput,
+  TerminalWriteInput,
+  TerminalResizeInput,
+  TerminalClearInput,
+  TerminalRestartInput,
+  TerminalCloseInput,
+  TerminalSessionSnapshot,
+} from "./terminal.ts";
+import { SystemStatsInput, SystemStats } from "./system.ts";
+import {
+  ScriptListInput,
+  ScriptGetInput,
+  ScriptDefinition,
+  ScriptUpsertInput,
+  ScriptDeleteInput,
+  ScriptRunInput,
+  ScriptStopInput,
+  ScriptLogsInput,
+  ScriptRun,
+} from "./scripts.ts";
+import { TunnelConfigureInput, TunnelInfo } from "./tunnel.ts";
+
+export const RpcMethod = {
+  // filesystem
+  filesystemBrowse: "filesystem.browse",
+
+  // terminal — request/response
+  terminalOpen: "terminal.open",
+  terminalWrite: "terminal.write",
+  terminalResize: "terminal.resize",
+  terminalClear: "terminal.clear",
+  terminalRestart: "terminal.restart",
+  terminalClose: "terminal.close",
+  terminalList: "terminal.list",
+
+  // terminal — streaming attach (server streams events after ack)
+  terminalAttach: "terminal.attach",
+
+  // system
+  systemStats: "system.stats",
+  systemStatsSubscribe: "system.statsSubscribe",
+
+  // scripts
+  scriptsList: "scripts.list",
+  scriptsGet: "scripts.get",
+  scriptsUpsert: "scripts.upsert",
+  scriptsDelete: "scripts.delete",
+  scriptsRun: "scripts.run",
+  scriptsStop: "scripts.stop",
+  scriptsLogs: "scripts.logs",
+
+  // tunnel
+  tunnelGet: "tunnel.get",
+  tunnelConfigure: "tunnel.configure",
+
+  // meta
+  serverProbe: "server.probe",
+  serverGetInfo: "server.getInfo",
+} as const;
+
+export type RpcMethod = (typeof RpcMethod)[keyof typeof RpcMethod];
+
+/** Envelope schemas */
+export const RpcRequest = z.object({
+  id: z.string().min(1),
+  method: z.string().min(1),
+  params: z.unknown().optional(),
+});
+export type RpcRequest = z.infer<typeof RpcRequest>;
+
+export const RpcSuccessResponse = z.object({
+  id: z.string().min(1),
+  result: z.unknown(),
+});
+export type RpcSuccessResponse = z.infer<typeof RpcSuccessResponse>;
+
+export const RpcErrorResponse = z.object({
+  id: z.string().min(1),
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+    details: z.unknown().optional(),
+  }),
+});
+export type RpcErrorResponse = z.infer<typeof RpcErrorResponse>;
+
+export const RpcEventMessage = z.object({
+  type: z.literal("event"),
+  channel: z.string().min(1),
+  payload: z.unknown(),
+});
+export type RpcEventMessage = z.infer<typeof RpcEventMessage>;
+
+// for building a typed registry (server side)
+export interface RpcDefinition<I, O> {
+  input: z.ZodType<I>;
+  output: z.ZodType<O>;
+}
+
+// Reference map for validation / docs
+export const RpcSchemas = {
+  [RpcMethod.filesystemBrowse]: { input: FilesystemBrowseInput, output: FilesystemBrowseResult },
+  [RpcMethod.terminalOpen]: { input: TerminalOpenInput, output: TerminalSessionSnapshot },
+  [RpcMethod.terminalWrite]: { input: TerminalWriteInput, output: z.void() },
+  [RpcMethod.terminalResize]: { input: TerminalResizeInput, output: z.void() },
+  [RpcMethod.terminalClear]: { input: TerminalClearInput, output: z.void() },
+  [RpcMethod.terminalRestart]: { input: TerminalRestartInput, output: TerminalSessionSnapshot },
+  [RpcMethod.terminalClose]: { input: TerminalCloseInput, output: z.void() },
+  [RpcMethod.terminalList]: { input: z.object({ sessionId: z.string().optional() }), output: z.array(z.any()) },
+  [RpcMethod.systemStats]: { input: SystemStatsInput, output: SystemStats },
+  [RpcMethod.scriptsList]: { input: ScriptListInput ?? z.object({}), output: z.array(ScriptDefinition) },
+  [RpcMethod.scriptsGet]: { input: ScriptGetInput, output: ScriptDefinition },
+  [RpcMethod.scriptsUpsert]: { input: ScriptUpsertInput, output: ScriptDefinition },
+  [RpcMethod.scriptsDelete]: { input: ScriptDeleteInput, output: z.void() },
+  [RpcMethod.scriptsRun]: { input: ScriptRunInput, output: ScriptRun },
+  [RpcMethod.scriptsStop]: { input: ScriptStopInput, output: z.void() },
+  [RpcMethod.scriptsLogs]: { input: ScriptLogsInput, output: z.object({ runId: z.string(), content: z.string() }) },
+  [RpcMethod.tunnelGet]: { input: z.object({}), output: TunnelInfo },
+  [RpcMethod.tunnelConfigure]: { input: TunnelConfigureInput, output: TunnelInfo },
+  [RpcMethod.serverProbe]: { input: z.object({}), output: z.object({ ok: z.boolean() }) },
+  [RpcMethod.serverGetInfo]: {
+    input: z.object({}),
+    output: z.object({
+      name: z.string(),
+      version: z.string(),
+      uptimeSeconds: z.number(),
+      port: z.number(),
+    }),
+  },
+} as const satisfies Record<string, RpcDefinition<any, any>>;

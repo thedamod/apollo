@@ -1,0 +1,14 @@
+packages:
+  - apps/*
+  - packages/*
+
+catalog:
+  typescript: ^5.7.3
+  zod: ^3.23.8
+  ws: ^8.18.0
+  node-pty: ^1.0.0
+
+# Only these packages may run postinstall scripts
+allowBuilds:
+  node-pty: true
+  esbuild: true

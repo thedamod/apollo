@@ -1,0 +1,30 @@
+node_modules
+dist
+.turbo
+.DS_Store
+*.log
+*.tsbuildinfo
+apps/*/dist
+packages/*/dist
+.env
+.env.local
+build/
+.logs/
+.t3
+.idea/
+.turbo/
+.vite/
+dist-electron/
+.t3
+# home-server local data (never commit machine state)
+.data/
+context/
+# test cli client (local only, per spec)
+apps/cli/
+cli/
+tmp-cli/
+# pnpm
+.pnpm-store/
+# secrets
+*.pem
+*.key

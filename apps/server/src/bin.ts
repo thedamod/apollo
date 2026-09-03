@@ -12,11 +12,13 @@ import { registerFilesystemHandlers } from "./rpc/handlers/filesystem.ts";
 import { registerTerminalHandlers } from "./rpc/handlers/terminal.ts";
 import { registerSystemHandlers } from "./rpc/handlers/system.ts";
 import { registerScriptHandlers } from "./rpc/handlers/scripts.ts";
+import { registerServiceHandlers } from "./rpc/handlers/services.ts";
 import { registerTunnelHandlers } from "./rpc/handlers/tunnel.ts";
 import { registerMetaHandlers } from "./rpc/handlers/meta.ts";
 import { FilesystemService } from "./services/filesystem.ts";
 import { SystemService } from "./services/system.ts";
 import { ScriptService } from "./services/scripts.ts";
+import { ServiceManager } from "./services/serviceManager.ts";
 import { TunnelService } from "./services/tunnel.ts";
 import { TerminalManager } from "./services/terminal/manager.ts";
 import * as tailscale from "@home-server/tailscale";
@@ -103,6 +105,8 @@ async function main(): Promise<void> {
   const systemService = new SystemService();
   const scriptService = new ScriptService(config.scriptsPath, config.logsDir);
   await scriptService.init();
+  const serviceManager = new ServiceManager(config.servicesPath, config.logsDir);
+  await serviceManager.init();
   const terminalManager = new TerminalManager(config.terminalLogsDir);
   await terminalManager.init();
   const tunnelService = new TunnelService(config.port, config.tailscaleServeEnabled ? "tailscale" : "disabled", config.tailscaleServePort);
@@ -114,6 +118,7 @@ async function main(): Promise<void> {
   registerTerminalHandlers(registry, terminalManager);
   registerSystemHandlers(registry, systemService);
   registerScriptHandlers(registry, scriptService);
+  registerServiceHandlers(registry, serviceManager);
   registerTunnelHandlers(registry, tunnelService);
 
   const app = createHttpApp({ config, token, systemService, filesystemService });
@@ -125,6 +130,7 @@ async function main(): Promise<void> {
     expectedToken: token,
     terminalManager,
     scriptService,
+    serviceManager,
     systemService,
   });
 
@@ -174,6 +180,7 @@ async function main(): Promise<void> {
     logger.info(`Received ${signal}, shutting down...`);
     clearRuntimeState();
     await terminalManager.shutdown().catch(() => {});
+    await serviceManager.shutdown().catch(() => {});
     await tunnelService.shutdown().catch(() => {});
     server.close(() => {
       logger.info("home-server stopped");

@@ -30,6 +30,20 @@ import {
   ScriptLogsInput,
   ScriptRun,
 } from "./scripts.ts";
+import {
+  ServiceListInput,
+  ServiceGetInput,
+  ServiceDefinition,
+  ServiceCreateInput,
+  ServiceUpdateInput,
+  ServiceDeleteInput,
+  ServiceStartInput,
+  ServiceStopInput,
+  ServiceRestartInput,
+  ServiceLogsInput,
+  ServiceStatusInput,
+  ServiceInstance,
+} from "./services.ts";
 import { TunnelConfigureInput, TunnelInfo } from "./tunnel.ts";
 
 export const RpcMethod = {
@@ -52,7 +66,7 @@ export const RpcMethod = {
   systemStats: "system.stats",
   systemStatsSubscribe: "system.statsSubscribe",
 
-  // scripts
+  // scripts (short-lived)
   scriptsList: "scripts.list",
   scriptsGet: "scripts.get",
   scriptsUpsert: "scripts.upsert",
@@ -60,6 +74,19 @@ export const RpcMethod = {
   scriptsRun: "scripts.run",
   scriptsStop: "scripts.stop",
   scriptsLogs: "scripts.logs",
+
+  // services (long-running, e.g. jellyfin) — supervised
+  servicesList: "services.list",
+  servicesGet: "services.get",
+  servicesCreate: "services.create",
+  servicesUpdate: "services.update",
+  servicesDelete: "services.delete",
+  servicesStart: "services.start",
+  servicesStop: "services.stop",
+  servicesRestart: "services.restart",
+  servicesLogs: "services.logs",
+  servicesStatus: "services.status",
+  servicesSubscribe: "services.subscribe",
 
   // tunnel
   tunnelGet: "tunnel.get",
@@ -127,6 +154,16 @@ export const RpcSchemas = {
   [RpcMethod.scriptsRun]: { input: ScriptRunInput, output: ScriptRun },
   [RpcMethod.scriptsStop]: { input: ScriptStopInput, output: z.void() },
   [RpcMethod.scriptsLogs]: { input: ScriptLogsInput, output: z.object({ runId: z.string(), content: z.string() }) },
+  [RpcMethod.servicesList]: { input: ServiceListInput ?? z.object({}), output: z.array(ServiceInstance) },
+  [RpcMethod.servicesGet]: { input: ServiceGetInput, output: ServiceInstance },
+  [RpcMethod.servicesCreate]: { input: ServiceCreateInput, output: ServiceDefinition },
+  [RpcMethod.servicesUpdate]: { input: ServiceUpdateInput, output: ServiceDefinition },
+  [RpcMethod.servicesDelete]: { input: ServiceDeleteInput, output: z.void() },
+  [RpcMethod.servicesStart]: { input: ServiceStartInput, output: ServiceInstance },
+  [RpcMethod.servicesStop]: { input: ServiceStopInput, output: ServiceInstance },
+  [RpcMethod.servicesRestart]: { input: ServiceRestartInput, output: ServiceInstance },
+  [RpcMethod.servicesLogs]: { input: ServiceLogsInput, output: z.object({ id: z.string(), content: z.string() }) },
+  [RpcMethod.servicesStatus]: { input: ServiceStatusInput, output: ServiceInstance },
   [RpcMethod.tunnelGet]: { input: z.object({}), output: TunnelInfo },
   [RpcMethod.tunnelConfigure]: { input: TunnelConfigureInput, output: TunnelInfo },
   [RpcMethod.serverProbe]: { input: z.object({}), output: z.object({ ok: z.boolean() }) },

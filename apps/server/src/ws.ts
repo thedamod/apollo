@@ -5,6 +5,7 @@ import { verifyToken } from "./auth.ts";
 import type { RpcRegistry } from "./rpc/registry.ts";
 import type { TerminalManager } from "./services/terminal/manager.ts";
 import type { ScriptService } from "./services/scripts.ts";
+import type { ServiceManager } from "./services/serviceManager.ts";
 import type { SystemService } from "./services/system.ts";
 
 /**
@@ -21,6 +22,7 @@ export interface WsRouterOptions {
   expectedToken: string;
   terminalManager: TerminalManager;
   scriptService: ScriptService;
+  serviceManager: ServiceManager;
   systemService: SystemService;
 }
 
@@ -99,6 +101,21 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
         });
         cleanups.push(cleanup);
         ws.send(JSON.stringify({ id: msg.id, result: { subscribed: true } }));
+        return;
+      }
+      if (msg.method === "services.subscribe" || msg.method === "servicesSubscribe") {
+        const cleanup = opts.serviceManager.onEvent((ev) => {
+          if (ws.readyState === WebSocket.OPEN)
+            ws.send(JSON.stringify({ type: "event", channel: "services", payload: ev }));
+        });
+        cleanups.push(cleanup);
+        ws.send(JSON.stringify({ id: msg.id, result: { subscribed: true } }));
+        // immediate snapshot
+        try {
+          const list = opts.serviceManager.list();
+          if (ws.readyState === WebSocket.OPEN)
+            ws.send(JSON.stringify({ type: "event", channel: "services", payload: { type: "snapshot", services: list } }));
+        } catch {}
         return;
       }
       if (msg.method === "system.statsSubscribe") {

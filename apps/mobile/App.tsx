@@ -13,13 +13,17 @@ import {
   type ServerCatalog,
   type ServerEntry,
 } from "./src/lib/client";
+import { AppearanceProvider } from "./src/features/appearance/AppearanceContext";
 import { TabBar, type TabKey } from "./src/components/TabBar";
 import { ConnectScreen } from "./src/screens/Connect";
 import { DEMO_HOME, HomeScreen, statsToHome, type HomeData } from "./src/screens/Home";
 import { FilesScreen } from "./src/screens/Files";
 import { ScriptsScreen } from "./src/screens/Scripts";
 import { ServicesScreen } from "./src/screens/Services";
-import { SettingsScreen, TerminalScreen } from "./src/screens/TerminalSettings";
+import { TerminalScreen } from "./src/screens/Terminal";
+import { AppearanceSettingsScreen } from "./src/screens/AppearanceSettings";
+import { EnvironmentsScreen } from "./src/screens/Environments";
+import { SettingsBackHeader, SettingsScreen, type SettingsRoute } from "./src/screens/Settings";
 
 const HISTORY_LEN = 24;
 // t3code-style supervisor backoff: 1s, 2s, 4s … capped at 30s
@@ -33,7 +37,9 @@ function pushHist(arr: number[], v: number): number[] {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <AppInner />
+      <AppearanceProvider>
+        <AppInner />
+      </AppearanceProvider>
     </SafeAreaProvider>
   );
 }
@@ -47,6 +53,7 @@ function AppInner() {
   const [connError, setConnError] = useState<string | null>(null);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [tab, setTab] = useState<TabKey>("home");
+  const [settingsRoute, setSettingsRoute] = useState<SettingsRoute>("main");
   const [home, setHome] = useState<HomeData>(DEMO_HOME);
   const [live, setLive] = useState(false);
   const [tunnel, setTunnel] = useState<{ provider?: string; status?: string; publicUrl?: string | null } | null>(null);
@@ -191,6 +198,7 @@ function AppInner() {
     setActive(null);
     setLive(false);
     setTab("home");
+    setSettingsRoute("main");
   }, []);
 
   const forgetServer = useCallback(
@@ -270,6 +278,43 @@ function AppInner() {
 
   const reconnecting = reconnectAttempt > 0 && !live;
 
+  const renderSettings = () => {
+    if (settingsRoute === "appearance") {
+      return (
+        <View style={styles.body}>
+          <SettingsBackHeader title="Appearance" onBack={() => setSettingsRoute("main")} />
+          <AppearanceSettingsScreen />
+        </View>
+      );
+    }
+    if (settingsRoute === "environments") {
+      return (
+        <View style={styles.body}>
+          <SettingsBackHeader title="Environments" onBack={() => setSettingsRoute("main")} />
+          <EnvironmentsScreen
+            servers={catalog.servers}
+            activeId={active.id}
+            connError={connError}
+            onSelect={(s) => void connectTo(s)}
+            onForget={forgetServer}
+            onAdded={addedServer}
+          />
+        </View>
+      );
+    }
+    return (
+      <SettingsScreen
+        route={settingsRoute}
+        onNavigate={setSettingsRoute}
+        baseUrl={active.baseUrl}
+        environmentCount={catalog.servers.length}
+        tunnel={tunnel}
+        serverInfo={serverInfo}
+        onDisconnect={switchServer}
+      />
+    );
+  };
+
   return (
     <SafeAreaView style={styles.safe} edges={["top", "right", "bottom", "left"]}>
       <StatusBar barStyle="light-content" />
@@ -286,7 +331,7 @@ function AppInner() {
           </View>
         ) : null}
         {tab === "home" ? (
-          <HomeScreen data={{ ...home, tailscaleIp }} hostLabel={hostLabel} onViewDetails={() => setTab("settings")} />
+          <HomeScreen data={{ ...home, tailscaleIp }} hostLabel={hostLabel} onViewDetails={() => { setSettingsRoute("main"); setTab("settings"); }} />
         ) : tab === "files" ? (
           <FilesScreen client={client} />
         ) : tab === "terminal" ? (
@@ -296,15 +341,10 @@ function AppInner() {
         ) : tab === "services" ? (
           <ServicesScreen client={client} />
         ) : (
-          <SettingsScreen
-            baseUrl={active.baseUrl}
-            tunnel={tunnel}
-            serverInfo={serverInfo}
-            onDisconnect={switchServer}
-          />
+          renderSettings()
         )}
       </View>
-      <TabBar active={tab} onChange={setTab} />
+      <TabBar active={tab} onChange={(t) => { if (t !== "settings") setSettingsRoute("main"); setTab(t); }} />
     </SafeAreaView>
   );
 }

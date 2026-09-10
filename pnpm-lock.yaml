@@ -47,6 +47,9 @@ importers:
       '@home-server/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@home-server/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       expo:
         specifier: ~56.0.0
         version: 56.0.21(@babel/core@7.29.7)(@expo/dom-webview@57.0.1)(react-native@0.85.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3)(typescript@5.9.3)

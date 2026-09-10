@@ -14,6 +14,7 @@
   "dependencies": {
     "@expo-google-fonts/dm-sans": "^0.4.2",
     "@home-server/contracts": "workspace:*",
+    "@home-server/shared": "workspace:*",
     "expo": "~56.0.0",
     "expo-blur": "~56.0.4",
     "expo-font": "~56.0.0",

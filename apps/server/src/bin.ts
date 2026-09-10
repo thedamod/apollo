@@ -149,8 +149,8 @@ async function main(): Promise<void> {
 
   await new Promise<void>((resolve, reject) => {
     server.listen(config.port, config.host, () => {
-      const addr = server.address() as any;
-      const actualPort = typeof addr === "object" ? addr.port : config.port;
+      const addr = server.address() as unknown as { port: number } | string | null;
+      const actualPort = typeof addr === "object" && addr !== null && "port" in addr ? (addr as { port: number }).port : config.port;
       writeRuntimeState(actualPort);
       logger.info(`home-server listening`, { host: config.host, port: actualPort });
       const pairing = createPairingToken();

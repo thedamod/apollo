@@ -7,6 +7,10 @@ catalog:
   zod: ^3.23.8
   ws: ^8.18.0
   node-pty: ^1.0.0
+  effect: ^3.17.0
+  "@effect/platform": ^0.93.0
+  "@effect/platform-node": ^0.93.0
+  "@types/node": ^22.10.2
 
 # Only these packages may run postinstall scripts
 allowBuilds:

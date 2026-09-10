@@ -48,8 +48,9 @@ export function createHttpApp(opts: {
     try {
       const result = await opts.filesystemService.browse(req.body ?? {});
       res.json(result);
-    } catch (e: any) {
-      res.status(400).json({ error: { code: e.code ?? "unknown", message: e.message } });
+    } catch (e: unknown) {
+      const err = e as { code?: string; message?: string };
+      res.status(400).json({ error: { code: err.code ?? "unknown", message: err.message ?? String(e) } });
     }
   });
 
@@ -57,8 +58,8 @@ export function createHttpApp(opts: {
     try {
       const stats = await opts.systemService.getStats({ diskPaths: req.query.disks ? String(req.query.disks).split(",") : undefined });
       res.json(stats);
-    } catch (e: any) {
-      res.status(500).json({ error: { message: e.message } });
+    } catch (e: unknown) {
+      res.status(500).json({ error: { message: (e as Error).message ?? String(e) } });
     }
   });
 

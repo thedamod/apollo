@@ -57,59 +57,60 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
     cleanups.push(() => clearInterval(pingInterval));
 
     ws.on("message", async (raw) => {
-      let msg: any;
+      let msg: unknown;
       try {
-        msg = JSON.parse(raw.toString());
+        msg = JSON.parse(raw.toString()) as { method?: string; params?: unknown; id?: string };
       } catch {
         ws.send(JSON.stringify({ error: { code: "bad_request", message: "Invalid JSON" } }));
         return;
       }
+      const typedMsg = msg as { method?: string; params?: unknown; id?: string };
 
       // Streaming attach: terminal.attach
-      if (msg.method === "terminal.attach") {
+      if (typedMsg.method === "terminal.attach") {
         try {
-          const params = msg.params ?? {};
+          const params = (typedMsg.params ?? {}) as { sessionId: string; terminalId: string };
           const send = (ev: unknown) => {
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: "event", channel: `terminal:${params.sessionId}:${params.terminalId}`, payload: ev }));
             }
           };
-          const cleanup = await opts.terminalManager.attachStream(params, async (ev) => send(ev));
+          const cleanup = await opts.terminalManager.attachStream(params as unknown as Parameters<typeof opts.terminalManager.attachStream>[0], async (ev) => send(ev));
           cleanups.push(cleanup);
-          // ack
-          ws.send(JSON.stringify({ id: msg.id, result: { attached: true } }));
-        } catch (e: any) {
-          ws.send(JSON.stringify({ id: msg.id, error: { code: e.code ?? "unknown", message: e.message } }));
+          ws.send(JSON.stringify({ id: typedMsg.id, result: { attached: true } }));
+        } catch (e: unknown) {
+          const err = e as { code?: string; message?: string };
+          ws.send(JSON.stringify({ id: typedMsg.id, error: { code: err.code ?? "unknown", message: err.message ?? String(e) } }));
         }
         return;
       }
 
       // Generic subscriptions
-      if (msg.method === "terminal.subscribe") {
+      if (typedMsg.method === "terminal.subscribe") {
         const cleanup = opts.terminalManager.subscribe((ev) => {
           if (ws.readyState === WebSocket.OPEN)
             ws.send(JSON.stringify({ type: "event", channel: "terminal", payload: ev }));
         });
         cleanups.push(cleanup);
-        ws.send(JSON.stringify({ id: msg.id, result: { subscribed: true } }));
+        ws.send(JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }));
         return;
       }
-      if (msg.method === "scripts.subscribe") {
+      if (typedMsg.method === "scripts.subscribe") {
         const cleanup = opts.scriptService.onEvent((ev) => {
           if (ws.readyState === WebSocket.OPEN)
             ws.send(JSON.stringify({ type: "event", channel: "scripts", payload: ev }));
         });
         cleanups.push(cleanup);
-        ws.send(JSON.stringify({ id: msg.id, result: { subscribed: true } }));
+        ws.send(JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }));
         return;
       }
-      if (msg.method === "services.subscribe" || msg.method === "servicesSubscribe") {
+      if (typedMsg.method === "services.subscribe" || typedMsg.method === "servicesSubscribe") {
         const cleanup = opts.serviceManager.onEvent((ev) => {
           if (ws.readyState === WebSocket.OPEN)
             ws.send(JSON.stringify({ type: "event", channel: "services", payload: ev }));
         });
         cleanups.push(cleanup);
-        ws.send(JSON.stringify({ id: msg.id, result: { subscribed: true } }));
+        ws.send(JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }));
         // immediate snapshot
         try {
           const list = opts.serviceManager.list();
@@ -118,7 +119,7 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
         } catch {}
         return;
       }
-      if (msg.method === "system.statsSubscribe") {
+      if (typedMsg.method === "system.statsSubscribe") {
         // push stats every 2s
         const interval = setInterval(async () => {
           try {
@@ -128,7 +129,7 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
           } catch {}
         }, 2000);
         cleanups.push(() => clearInterval(interval));
-        ws.send(JSON.stringify({ id: msg.id, result: { subscribed: true } }));
+        ws.send(JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }));
         // immediate
         opts.systemService.getStats({}).then((stats) => {
           if (ws.readyState === WebSocket.OPEN)
@@ -138,7 +139,7 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
       }
 
       // Normal RPC
-      const { id, method, params } = msg;
+      const { id, method, params } = typedMsg;
       if (!id || !method) {
         ws.send(JSON.stringify({ error: { code: "bad_request", message: "Missing id/method" } }));
         return;
@@ -146,9 +147,9 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
       try {
         const result = await opts.registry.call(method, params, { token: null, reqId: id });
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ id, result: result ?? null }));
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (ws.readyState === WebSocket.OPEN)
-          ws.send(JSON.stringify({ id, error: { code: e.code ?? "unknown", message: e.message ?? String(e) } }));
+          ws.send(JSON.stringify({ id, error: { code: (e as { code?: string }).code ?? "unknown", message: (e as Error).message ?? String(e) } }));
       }
     });
 

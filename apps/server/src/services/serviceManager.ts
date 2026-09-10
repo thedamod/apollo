@@ -1,10 +1,14 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { spawn, execFile } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import * as crypto from "node:crypto";
 import * as net from "node:net";
+import * as Effect from "effect/Effect";
+import * as Context from "effect/Context";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import type {
   ServiceDefinition,
   ServiceInstance,
@@ -14,19 +18,77 @@ import type {
 
 const execFileAsync = promisify(execFile);
 
+// ---------------------------------------------------------------------------
+// Errors — typed, no `any`
+// ---------------------------------------------------------------------------
+
+export class ServiceNotFoundError extends Schema.TaggedError<ServiceNotFoundError>()(
+  "ServiceNotFoundError",
+  { id: Schema.String },
+) {
+  get message() {
+    return `Unknown service: ${this.id}`;
+  }
+}
+
+export class ServiceAlreadyExistsError extends Schema.TaggedError<ServiceAlreadyExistsError>()(
+  "ServiceAlreadyExistsError",
+  { id: Schema.String },
+) {
+  get message() {
+    return `Service already exists: ${this.id}`;
+  }
+}
+
+export class ServiceDriverError extends Schema.TaggedError<ServiceDriverError>()(
+  "ServiceDriverError",
+  {
+    id: Schema.String,
+    driver: Schema.String,
+    cause: Schema.optional(Schema.Defect),
+  },
+) {
+  get message() {
+    return `Driver ${this.driver} failed for ${this.id}`;
+  }
+}
+
+export class ServiceInvalidIdError extends Schema.TaggedError<ServiceInvalidIdError>()(
+  "ServiceInvalidIdError",
+  { id: Schema.String },
+) {
+  get message() {
+    return `Invalid service id: ${this.id}`;
+  }
+}
+
+export type ServiceError = ServiceNotFoundError | ServiceAlreadyExistsError | ServiceDriverError | ServiceInvalidIdError;
+
+export class ServiceManagerTag extends Context.Tag("home-server/ServiceManager")<
+  ServiceManagerTag,
+  {
+    readonly list: () => Effect.Effect<ReadonlyArray<ServiceInstance>>;
+    readonly get: (id: string) => Effect.Effect<ServiceInstance, ServiceNotFoundError>;
+    readonly create: (
+      input: Parameters<ServiceManager["create"]>[0],
+    ) => Effect.Effect<ServiceDefinition, ServiceAlreadyExistsError | ServiceInvalidIdError>;
+    readonly start: (id: string) => Effect.Effect<ServiceInstance, ServiceNotFoundError | ServiceDriverError>;
+  }
+>() {}
+
 // ---------- Drivers ----------
 
 export interface ServiceDriver {
   readonly type: string;
-  start(def: ServiceDefinition, logsPath: string): Promise<{ pid: number | null; proc: any | null }>;
-  stop(def: ServiceDefinition, proc: any | null, signal?: string): Promise<void>;
-  status(def: ServiceDefinition, proc: any | null): Promise<{ running: boolean; pid: number | null }>;
+  start(def: ServiceDefinition, logsPath: string): Promise<{ pid: number | null; proc: ChildProcess | null }>;
+  stop(def: ServiceDefinition, proc: ChildProcess | null, signal?: string): Promise<void>;
+  status(def: ServiceDefinition, proc: ChildProcess | null): Promise<{ running: boolean; pid: number | null }>;
   logs(def: ServiceDefinition, tailLines: number): Promise<string>;
 }
 
 class ShellDriver implements ServiceDriver {
   readonly type = "shell";
-  async start(def: ServiceDefinition, logsPath: string): Promise<{ pid: number | null; proc: any }> {
+  async start(def: ServiceDefinition, logsPath: string): Promise<{ pid: number | null; proc: ChildProcess | null }> {
     const cwd = def.cwd ?? process.cwd();
     const env = { ...process.env, ...(def.env ?? {}) };
     const child = spawn(def.command, {
@@ -49,11 +111,10 @@ class ShellDriver implements ServiceDriver {
     });
     return { pid: child.pid ?? null, proc: child };
   }
-  async stop(_def: ServiceDefinition, proc: any | null, signal = "SIGTERM"): Promise<void> {
+  async stop(_def: ServiceDefinition, proc: ChildProcess | null, signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
     if (!proc) return;
     try {
       proc.kill(signal);
-      // escalate
       setTimeout(() => {
         try {
           proc.kill("SIGKILL");
@@ -61,7 +122,7 @@ class ShellDriver implements ServiceDriver {
       }, 3000).unref();
     } catch {}
   }
-  async status(_def: ServiceDefinition, proc: any | null): Promise<{ running: boolean; pid: number | null }> {
+  async status(_def: ServiceDefinition, proc: ChildProcess | null): Promise<{ running: boolean; pid: number | null }> {
     if (!proc) return { running: false, pid: null };
     // check if pid alive: proc.exitCode === null means running
     if (proc.exitCode !== null) return { running: false, pid: null };
@@ -84,7 +145,7 @@ class SystemdDriver implements ServiceDriver {
   private unitOf(def: ServiceDefinition): string {
     return def.systemdUnit ?? `${def.id}.service`;
   }
-  async start(def: ServiceDefinition): Promise<{ pid: number | null; proc: any | null }> {
+  async start(def: ServiceDefinition): Promise<{ pid: number | null; proc: ChildProcess | null }> {
     const unit = this.unitOf(def);
     await execFileAsync("systemctl", ["start", unit]);
     return { pid: null, proc: null };
@@ -114,8 +175,8 @@ class SystemdDriver implements ServiceDriver {
     try {
       const { stdout } = await execFileAsync("journalctl", ["-u", unit, "-n", String(tailLines), "--no-pager"]);
       return stdout;
-    } catch (e: any) {
-      return `journalctl failed: ${e.message}`;
+    } catch (e: unknown) {
+      return `journalctl failed: ${(e as Error).message}`;
     }
   }
 }
@@ -125,7 +186,7 @@ class DockerDriver implements ServiceDriver {
   private containerOf(def: ServiceDefinition): string {
     return def.dockerContainer ?? def.id;
   }
-  async start(def: ServiceDefinition): Promise<{ pid: number | null; proc: any | null }> {
+  async start(def: ServiceDefinition): Promise<{ pid: number | null; proc: ChildProcess | null }> {
     const container = this.containerOf(def);
     // try docker start, else docker run
     try {
@@ -172,8 +233,8 @@ class DockerDriver implements ServiceDriver {
     try {
       const { stdout } = await execFileAsync("docker", ["logs", "--tail", String(tailLines), container]);
       return stdout;
-    } catch (e: any) {
-      return `docker logs failed: ${e.message}`;
+    } catch (e: unknown) {
+      return `docker logs failed: ${(e as Error).message}`;
     }
   }
 }
@@ -213,7 +274,7 @@ async function checkHttp(url: string, timeoutMs = 2000): Promise<boolean> {
 interface RuntimeState {
   def: ServiceDefinition;
   status: ServiceStatus;
-  proc: any | null;
+  proc: ChildProcess | null;
   pid: number | null;
   startedAt: string | null;
   restartCount: number;
@@ -255,14 +316,13 @@ export class ServiceManager {
         this.defs.set(normalized.id, normalized);
         this.runtimes.set(normalized.id, this.makeRuntime(normalized));
       }
-    } catch (e: any) {
-      if (e?.code !== "ENOENT") console.warn("[services] failed to load", e.message);
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") console.warn("[services] failed to load", (e as Error).message);
     }
     // auto-start enabled services
     for (const rt of this.runtimes.values()) {
       if (rt.def.enabled) {
-        // don't await, start async
-        this.start(rt.def.id).catch((err) => console.warn(`[services] auto-start ${rt.def.id} failed:`, err.message));
+        this.start(rt.def.id).catch((err: unknown) => console.warn(`[services] auto-start ${rt.def.id} failed:`, (err as Error).message));
       }
     }
     this.startMonitors();
@@ -464,17 +524,17 @@ export class ServiceManager {
             setTimeout(() => {
               if (rt.stopping) return;
               this.start(id).catch((e) => {
-                rt.lastError = e.message;
-                this.emit({ type: "error", serviceId: id, message: e.message });
+                rt.lastError = (e as Error).message;
+                this.emit({ type: "error", serviceId: id, message: (e as Error).message });
               });
             }, delay);
           }
         };
         proc.on("close", onClose);
         proc.on("error", (err: Error) => {
-          rt.lastError = err.message;
+          rt.lastError = (err as Error).message;
           rt.status = "error";
-          this.emit({ type: "error", serviceId: id, message: err.message });
+          this.emit({ type: "error", serviceId: id, message: (err as Error).message });
         });
         // pipe output events for shell
         proc.stdout?.on("data", (d: Buffer) => this.emit({ type: "output", serviceId: id, data: d.toString("utf8") }));
@@ -487,10 +547,10 @@ export class ServiceManager {
       this.runHealthCheck(rt).catch(() => {});
       this.emit({ type: "status", service: this.toInstance(rt) });
       return this.toInstance(rt);
-    } catch (e: any) {
+    } catch (e: unknown) {
       rt.status = "error";
-      rt.lastError = e.message;
-      this.emit({ type: "error", serviceId: id, message: e.message });
+      rt.lastError = (e as Error).message;
+      this.emit({ type: "error", serviceId: id, message: (e as Error).message });
       throw e;
     }
   }
@@ -505,8 +565,8 @@ export class ServiceManager {
     const driver = this.drivers.get(rt.def.type);
     try {
       await driver?.stop(rt.def, rt.proc, signal);
-    } catch (e: any) {
-      rt.lastError = e.message;
+    } catch (e: unknown) {
+      rt.lastError = (e as Error).message;
     }
     // for shell, wait a bit then force
     if (rt.proc) {
@@ -517,7 +577,7 @@ export class ServiceManager {
           } catch {}
           resolve();
         }, 2000);
-        rt.proc.once("close", () => {
+        rt.proc!.once("close", () => {
           clearTimeout(t);
           resolve();
         });
@@ -596,9 +656,9 @@ export class ServiceManager {
         ok = rt.status === "running" && !!rt.pid;
         if (!ok) message = "Process not running";
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       ok = false;
-      message = e.message;
+      message = (e as Error).message;
     }
     rt.health = { ok, checkedAt: new Date().toISOString(), message };
     this.emit({ type: "health", serviceId: rt.def.id, health: rt.health });
@@ -617,8 +677,8 @@ export class ServiceManager {
       const lines = content.split("\n");
       if (lines.length <= tailLines) return content;
       return lines.slice(lines.length - tailLines).join("\n");
-    } catch (e: any) {
-      if (e?.code === "ENOENT") return "";
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return "";
       throw e;
     }
   }

@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": { "types": "./src/index.ts", "import": "./src/index.ts" },
+    "./hostProcess": { "types": "./src/hostProcess.ts", "import": "./src/hostProcess.ts" },
     "./path": { "types": "./src/path.ts", "import": "./src/path.ts" },
     "./shell": { "types": "./src/shell.ts", "import": "./src/shell.ts" },
     "./terminalLabels": { "types": "./src/terminalLabels.ts", "import": "./src/terminalLabels.ts" }
@@ -12,7 +13,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "effect": "catalog:"
+  },
   "devDependencies": {
+    "@types/node": "catalog:",
     "typescript": "catalog:"
   }
 }

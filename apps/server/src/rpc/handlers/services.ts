@@ -20,10 +20,10 @@ export function registerServiceHandlers(reg: RpcRegistry, svc: ServiceManager): 
     if (!s) throw Object.assign(new Error(`Unknown service: ${p.id}`), { code: "not_found" });
     return s;
   });
-  reg.registerZod(RpcMethod.servicesCreate, ServiceCreateInput, async (p) => svc.create(p as any));
+  reg.registerZod(RpcMethod.servicesCreate, ServiceCreateInput, async (p) => svc.create(p as unknown as Parameters<ServiceManager["create"]>[0]));
   reg.registerZod(RpcMethod.servicesUpdate, ServiceUpdateInput, async (p) => {
     const { id, ...patch } = p;
-    return svc.update(id, patch as any);
+    return svc.update(id, patch as unknown as Parameters<ServiceManager["update"]>[1]);
   });
   reg.registerZod(RpcMethod.servicesDelete, ServiceDeleteInput, async (p) => svc.delete(p.id));
   reg.registerZod(RpcMethod.servicesStart, ServiceStartInput, async (p) => svc.start(p.id));

@@ -1,13 +1,35 @@
 import type { TunnelInfo, TunnelProviderKind } from "@home-server/contracts";
 import * as tailscale from "@home-server/tailscale";
+import * as Effect from "effect/Effect";
+import * as Context from "effect/Context";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+
+export class TunnelError extends Schema.TaggedError<TunnelError>()("TunnelError", {
+  provider: Schema.String,
+  cause: Schema.optional(Schema.Defect),
+}) {}
 
 export interface TunnelProvider {
   readonly kind: TunnelProviderKind;
-  ensure(localPort: number, opts?: Record<string, unknown>): Promise<string | null>; // returns publicUrl
+  ensure(localPort: number, opts?: Record<string, unknown>): Promise<string | null>;
   disable(): Promise<void>;
   probe(publicUrl: string): Promise<boolean>;
   getStatus(): Promise<TunnelInfo>;
 }
+
+export class TunnelServiceTag extends Context.Tag("home-server/TunnelService")<
+  TunnelServiceTag,
+  {
+    readonly configure: (input: {
+      provider: TunnelProviderKind;
+      options?: Record<string, unknown>;
+    }) => Effect.Effect<TunnelInfo, TunnelError>;
+    readonly getInfo: () => Effect.Effect<TunnelInfo, never>;
+    readonly ensure: () => Effect.Effect<TunnelInfo, never>;
+    readonly shutdown: () => Effect.Effect<void, never>;
+  }
+>() {}
 
 /** Tailscale provider — wraps @home-server/tailscale */
 export class TailscaleTunnelProvider implements TunnelProvider {
@@ -21,34 +43,53 @@ export class TailscaleTunnelProvider implements TunnelProvider {
     private readonly servePort: number = 443,
   ) {}
 
-  async ensure(localPort: number, _opts?: Record<string, unknown>): Promise<string | null> {
-    this.status = "connecting";
-    this.error = null;
-    try {
-      const st = await tailscale.readTailscaleStatus().catch(() => null);
+  ensureEffect(localPort: number, _opts?: Record<string, unknown>): Effect.Effect<string | null, TunnelError> {
+    return Effect.gen(this, function* () {
+      this.status = "connecting";
+      this.error = null;
+      const st = yield* Effect.tryPromise({
+        try: () => tailscale.readTailscaleStatus(),
+        catch: () => null as unknown as Awaited<ReturnType<typeof tailscale.readTailscaleStatus>> | null,
+      }).pipe(Effect.orElseSucceed(() => null as unknown as Awaited<ReturnType<typeof tailscale.readTailscaleStatus>> | null));
       if (!st?.magicDnsName) {
         this.status = "error";
         this.error = "Not logged into tailscale (no MagicDNS)";
         this.publicUrl = null;
         return null;
       }
-      await tailscale.ensureTailscaleServe({ localPort, servePort: this.servePort });
+      yield* Effect.tryPromise({
+        try: () => tailscale.ensureTailscaleServe({ localPort, servePort: this.servePort }),
+        catch: (cause) => new TunnelError({ provider: "tailscale", cause }),
+      }).pipe(Effect.catchAll((e) => Effect.fail(e as TunnelError)));
       this.publicUrl = tailscale.buildTailscaleHttpsBaseUrl({
         magicDnsName: st.magicDnsName,
         servePort: this.servePort,
       });
       this.status = "connected";
       return this.publicUrl;
-    } catch (e: any) {
-      this.status = "error";
-      this.error = e.message;
-      this.publicUrl = null;
-      return null;
-    }
+    }).pipe(
+      Effect.catchAll((cause) =>
+        Effect.gen(this, function* () {
+          this.status = "error";
+          this.error = cause instanceof Error ? cause.message : String(cause);
+          this.publicUrl = null;
+          return null;
+        }),
+      ),
+    );
+  }
+
+  async ensure(localPort: number, _opts?: Record<string, unknown>): Promise<string | null> {
+    return Effect.runPromise(this.ensureEffect(localPort, _opts));
   }
 
   async disable(): Promise<void> {
-    await tailscale.tryDisableTailscaleServe({ servePort: this.servePort });
+    await Effect.runPromise(
+      Effect.tryPromise({
+        try: () => tailscale.tryDisableTailscaleServe({ servePort: this.servePort }),
+        catch: () => undefined as void,
+      }).pipe(Effect.orElseSucceed(() => undefined)),
+    );
     this.status = "disconnected";
     this.publicUrl = null;
     this.error = null;
@@ -110,41 +151,85 @@ export class TunnelService {
         return new TailscaleTunnelProvider(localPort, servePort);
       case "disabled":
         return new DisabledTunnelProvider(localPort);
-      // extensible: cloudflare, frp
       default:
         return new DisabledTunnelProvider(localPort);
     }
   }
 
+  configureEffect(input: {
+    provider: TunnelProviderKind;
+    options?: Record<string, unknown>;
+  }): Effect.Effect<TunnelInfo, TunnelError> {
+    return Effect.gen(this, function* () {
+      if (input.provider !== this.provider.kind) {
+        yield* Effect.tryPromise({
+          try: () => this.provider.disable(),
+          catch: () => undefined as void,
+        }).pipe(Effect.orElseSucceed(() => undefined));
+        const localPort = (yield* Effect.promise(() => this.provider.getStatus())).localPort;
+        this.provider = this.createProvider(input.provider, localPort, 443);
+      }
+      if (input.provider === "disabled") {
+        yield* Effect.tryPromise({
+          try: () => this.provider.disable(),
+          catch: () => undefined as void,
+        }).pipe(Effect.orElseSucceed(() => undefined));
+        return yield* Effect.promise(() => this.provider.getStatus());
+      }
+      const info = yield* Effect.promise(() => this.provider.getStatus());
+      yield* Effect.tryPromise({
+        try: () => this.provider.ensure(info.localPort, input.options),
+        catch: (cause) => new TunnelError({ provider: input.provider, cause }),
+      }).pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
+      return yield* Effect.promise(() => this.provider.getStatus());
+    });
+  }
+
   async configure(input: { provider: TunnelProviderKind; options?: Record<string, unknown> }): Promise<TunnelInfo> {
-    // if switching provider, disable old
-    if (input.provider !== this.provider.kind) {
-      await this.provider.disable().catch(() => {});
-      const localPort = (await this.provider.getStatus()).localPort;
-      this.provider = this.createProvider(input.provider, localPort, 443);
-    }
-    if (input.provider === "disabled") {
-      await this.provider.disable();
-      return this.provider.getStatus();
-    }
-    const info = await this.provider.getStatus();
-    await this.provider.ensure(info.localPort, input.options as any);
-    return this.provider.getStatus();
+    return Effect.runPromise(this.configureEffect(input).pipe(Effect.orElseSucceed(() => ({ provider: input.provider, status: "error" as const, publicUrl: null, localPort: 0, error: "configure failed", updatedAt: new Date().toISOString() } as TunnelInfo))));
+  }
+
+  getInfoEffect(): Effect.Effect<TunnelInfo> {
+    return Effect.promise(() => this.provider.getStatus());
   }
 
   async getInfo(): Promise<TunnelInfo> {
-    return this.provider.getStatus();
+    return Effect.runPromise(this.getInfoEffect());
+  }
+
+  ensureEffect(): Effect.Effect<TunnelInfo> {
+    return Effect.gen(this, function* () {
+      const info = yield* Effect.promise(() => this.provider.getStatus());
+      if (info.provider !== "disabled" && info.status !== "connected") {
+        yield* Effect.tryPromise({
+          try: () => this.provider.ensure(info.localPort),
+          catch: () => null as string | null,
+        }).pipe(Effect.orElseSucceed(() => null as string | null));
+      }
+      return yield* Effect.promise(() => this.provider.getStatus());
+    });
   }
 
   async ensure(): Promise<TunnelInfo> {
-    const info = await this.provider.getStatus();
-    if (info.provider !== "disabled" && info.status !== "connected") {
-      await this.provider.ensure(info.localPort);
-    }
-    return this.provider.getStatus();
+    return Effect.runPromise(this.ensureEffect());
+  }
+
+  shutdownEffect(): Effect.Effect<void> {
+    return Effect.tryPromise({
+      try: () => this.provider.disable(),
+      catch: () => undefined as void,
+    }).pipe(Effect.orElseSucceed(() => undefined));
   }
 
   async shutdown(): Promise<void> {
-    await this.provider.disable().catch(() => {});
+    await Effect.runPromise(this.shutdownEffect());
   }
 }
+
+export const TunnelServiceLive = (localPort: number, kind: TunnelProviderKind = "disabled", servePort = 443) =>
+  Layer.succeed(TunnelServiceTag, TunnelServiceTag.of({
+    configure: (input) => new TunnelService(localPort, kind, servePort).configureEffect(input),
+    getInfo: () => new TunnelService(localPort, kind, servePort).getInfoEffect(),
+    ensure: () => new TunnelService(localPort, kind, servePort).ensureEffect(),
+    shutdown: () => new TunnelService(localPort, kind, servePort).shutdownEffect(),
+  }));

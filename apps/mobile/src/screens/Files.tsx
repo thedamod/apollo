@@ -5,7 +5,6 @@ import {
   Image,
   Linking,
   Modal,
-  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -640,9 +639,16 @@ function clamp(v: number, min: number, max: number): number {
 }
 
 /**
- * Pinch-to-zoom + pan container (no native deps — ScrollView zoom only
- * works on iOS). Two fingers scale 1–5x, one finger pans while zoomed,
- * translation resets when pinching back to 1x.
+ * Pinch-to-zoom + pan + double-tap container (no native deps — ScrollView
+ * zoom only works on iOS).
+ *
+ * Deliberately NOT based on `nativeEvent.touches` (unreliable in responder
+ * events on some Android builds — the previous implementation never saw
+ * two touches). Instead every touchdown is tracked by `identifier` via
+ * `onTouchStart`, positions update from `changedTouches` in
+ * `onResponderMove`, and fingers are pruned in `onTouchEnd/Cancel`.
+ * Two tracked touches scale 1–5x, one touch pans while zoomed,
+ * double-tap toggles 1x/2.5x.
  */
 function Zoomable({ children }: { children: React.ReactNode }) {
   const [t, setT] = useState({ scale: 1, tx: 0, ty: 0 });
@@ -650,88 +656,140 @@ function Zoomable({ children }: { children: React.ReactNode }) {
     scale: 1,
     tx: 0,
     ty: 0,
-    startDist: 0,
-    baseScale: 1,
-    lastX: 0,
-    lastY: 0,
-    mode: "none" as "none" | "pinch" | "pan",
+    active: new Map<string, { x: number; y: number }>(),
+    peak: 0,
+    pinchDist: 0,
+    pinchBase: 1,
+    panX: 0,
+    panY: 0,
+    downTime: 0,
+    downX: 0,
+    downY: 0,
+    lastTapTime: 0,
+    lastTapX: 0,
+    lastTapY: 0,
   });
   const commit = useCallback(() => {
     setT({ scale: r.current.scale, tx: r.current.tx, ty: r.current.ty });
   }, []);
 
-  const responder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (e) => {
-        const touches = e.nativeEvent.touches;
-        if (touches.length >= 2 && touches[0] && touches[1]) {
-          r.current.mode = "pinch";
-          r.current.startDist = Math.hypot(
-            touches[0].pageX - touches[1].pageX,
-            touches[0].pageY - touches[1].pageY,
-          );
-          r.current.baseScale = r.current.scale;
-        } else if (touches.length === 1 && touches[0] && r.current.scale > 1) {
-          r.current.mode = "pan";
-          r.current.lastX = touches[0].pageX;
-          r.current.lastY = touches[0].pageY;
-        } else {
-          r.current.mode = "none";
-        }
-      },
-      onPanResponderMove: (e) => {
-        const touches = e.nativeEvent.touches;
-        if (touches.length >= 2 && touches[0] && touches[1]) {
-          // second finger landed mid-gesture — (re)start the pinch
-          if (r.current.mode !== "pinch") {
-            r.current.mode = "pinch";
-            r.current.startDist = Math.hypot(
-              touches[0].pageX - touches[1].pageX,
-              touches[0].pageY - touches[1].pageY,
-            );
-            r.current.baseScale = r.current.scale;
-            return;
-          }
-          if (r.current.startDist > 0) {
-            r.current.scale = clamp(r.current.baseScale * (Math.hypot(
-              touches[0].pageX - touches[1].pageX,
-              touches[0].pageY - touches[1].pageY,
-            ) / r.current.startDist), 1, 5);
-            if (r.current.scale <= 1) {
-              r.current.tx = 0;
-              r.current.ty = 0;
-            }
-            commit();
-          }
-        } else if (r.current.mode === "pinch" && touches.length === 1 && touches[0] && r.current.scale > 1) {
-          // lifted one finger mid-pinch — keep panning
-          r.current.mode = "pan";
-          r.current.lastX = touches[0].pageX;
-          r.current.lastY = touches[0].pageY;
-        } else if (r.current.mode === "pan" && touches.length === 1 && touches[0]) {
-          const dx = touches[0].pageX - r.current.lastX;
-          const dy = touches[0].pageY - r.current.lastY;
-          r.current.lastX = touches[0].pageX;
-          r.current.lastY = touches[0].pageY;
-          const lim = 320 * r.current.scale;
-          r.current.tx = clamp(r.current.tx + dx, -lim, lim);
-          r.current.ty = clamp(r.current.ty + dy, -lim, lim);
-          commit();
-        }
-      },
-      onPanResponderRelease: () => {
-        r.current.mode = "none";
-      },
-      onPanResponderTerminate: () => {
-        r.current.mode = "none";
-      },
-    }),
-  ).current;
+  const pairDist = useCallback((): number => {
+    const pts = [...r.current.active.values()];
+    if (pts.length < 2 || !pts[0] || !pts[1]) return 0;
+    return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+  }, []);
+
+  const applyScale = useCallback(
+    (s: number) => {
+      r.current.scale = clamp(s, 1, 5);
+      if (r.current.scale <= 1) {
+        r.current.tx = 0;
+        r.current.ty = 0;
+      }
+      commit();
+    },
+    [commit],
+  );
 
   return (
-    <View style={styles.zoomArea} {...responder.panHandlers}>
+    <View
+      style={styles.zoomArea}
+      onStartShouldSetResponder={() => true}
+      onResponderTerminationRequest={() => false}
+      onTouchStart={(e) => {
+        const now = Date.now();
+        for (const touch of e.nativeEvent.changedTouches) {
+          r.current.active.set(touch.identifier, { x: touch.pageX, y: touch.pageY });
+        }
+        r.current.peak = Math.max(r.current.peak, r.current.active.size);
+        if (r.current.active.size >= 2) {
+          r.current.pinchDist = pairDist();
+          r.current.pinchBase = r.current.scale;
+        } else {
+          const first = e.nativeEvent.changedTouches[0];
+          if (first) {
+            r.current.downTime = now;
+            r.current.downX = first.pageX;
+            r.current.downY = first.pageY;
+            r.current.panX = first.pageX;
+            r.current.panY = first.pageY;
+          }
+        }
+      }}
+      onResponderMove={(e) => {
+        for (const touch of e.nativeEvent.changedTouches) {
+          if (r.current.active.has(touch.identifier)) {
+            r.current.active.set(touch.identifier, { x: touch.pageX, y: touch.pageY });
+          }
+        }
+        if (r.current.active.size >= 2) {
+          const d = pairDist();
+          if (r.current.pinchDist > 0 && d > 0) {
+            applyScale(r.current.pinchBase * (d / r.current.pinchDist));
+          }
+        } else if (r.current.active.size === 1 && r.current.scale > 1) {
+          const touch = e.nativeEvent.changedTouches[0];
+          if (touch && r.current.active.has(touch.identifier)) {
+            const dx = touch.pageX - r.current.panX;
+            const dy = touch.pageY - r.current.panY;
+            r.current.panX = touch.pageX;
+            r.current.panY = touch.pageY;
+            const lim = 320 * r.current.scale;
+            r.current.tx = clamp(r.current.tx + dx, -lim, lim);
+            r.current.ty = clamp(r.current.ty + dy, -lim, lim);
+            commit();
+          }
+        }
+      }}
+      onTouchEnd={(e) => {
+        const now = Date.now();
+        let quickTap: { x: number; y: number } | null = null;
+        for (const touch of e.nativeEvent.changedTouches) {
+          r.current.active.delete(touch.identifier);
+          // only single-finger gestures count as taps — a pinch release
+          // must never toggle zoom
+          if (r.current.active.size === 0 && r.current.peak <= 1) {
+            const dt = now - r.current.downTime;
+            const moved = Math.hypot(touch.pageX - r.current.downX, touch.pageY - r.current.downY);
+            if (dt < 300 && moved < 24) quickTap = { x: touch.pageX, y: touch.pageY };
+          }
+        }
+        if (r.current.active.size < 2) r.current.pinchDist = 0;
+        if (r.current.active.size === 1) {
+          const remaining = [...r.current.active.values()][0];
+          if (remaining) {
+            r.current.panX = remaining.x;
+            r.current.panY = remaining.y;
+          }
+        }
+        if (quickTap) {
+          const gap = now - r.current.lastTapTime;
+          const near =
+            Math.hypot(quickTap.x - r.current.lastTapX, quickTap.y - r.current.lastTapY) < 48;
+          if (gap < 350 && near) {
+            // double-tap: toggle zoom
+            r.current.lastTapTime = 0;
+            applyScale(r.current.scale > 1 ? 1 : 2.5);
+          } else {
+            r.current.lastTapTime = now;
+            r.current.lastTapX = quickTap.x;
+            r.current.lastTapY = quickTap.y;
+          }
+        }
+      }}
+      onTouchCancel={(e) => {
+        for (const touch of e.nativeEvent.changedTouches) {
+          r.current.active.delete(touch.identifier);
+        }
+        if (r.current.active.size === 0) r.current.peak = 0;
+        r.current.pinchDist = 0;
+      }}
+      onResponderRelease={() => {
+        r.current.active.clear();
+        r.current.peak = 0;
+        r.current.pinchDist = 0;
+      }}
+    >
       <View
         style={[
           styles.zoomContent,

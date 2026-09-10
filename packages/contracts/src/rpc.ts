@@ -9,6 +9,18 @@ import { z } from "zod";
 
 import { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
 import {
+  FilesystemPathInput,
+  FilesystemStatResult,
+  FilesystemReadInput,
+  FilesystemReadResult,
+  FilesystemMkdirInput,
+  FilesystemMkdirResult,
+  FilesystemRenameInput,
+  FilesystemRenameResult,
+  FilesystemDeleteInput,
+  FilesystemDeleteResult,
+} from "./filesystem.ts";
+import {
   TerminalOpenInput,
   TerminalAttachInput,
   TerminalWriteInput,
@@ -49,6 +61,11 @@ import { TunnelConfigureInput, TunnelInfo } from "./tunnel.ts";
 export const RpcMethod = {
   // filesystem
   filesystemBrowse: "filesystem.browse",
+  filesystemStat: "filesystem.stat",
+  filesystemReadFile: "filesystem.readFile",
+  filesystemMkdir: "filesystem.mkdir",
+  filesystemRename: "filesystem.rename",
+  filesystemDelete: "filesystem.delete",
 
   // terminal — request/response
   terminalOpen: "terminal.open",
@@ -139,6 +156,11 @@ export interface RpcDefinition<I, O> {
 // Reference map for validation / docs
 export const RpcSchemas = {
   [RpcMethod.filesystemBrowse]: { input: FilesystemBrowseInput, output: FilesystemBrowseResult },
+  [RpcMethod.filesystemStat]: { input: FilesystemPathInput, output: FilesystemStatResult },
+  [RpcMethod.filesystemReadFile]: { input: FilesystemReadInput, output: FilesystemReadResult },
+  [RpcMethod.filesystemMkdir]: { input: FilesystemMkdirInput, output: FilesystemMkdirResult },
+  [RpcMethod.filesystemRename]: { input: FilesystemRenameInput, output: FilesystemRenameResult },
+  [RpcMethod.filesystemDelete]: { input: FilesystemDeleteInput, output: FilesystemDeleteResult },
   [RpcMethod.terminalOpen]: { input: TerminalOpenInput, output: TerminalSessionSnapshot },
   [RpcMethod.terminalWrite]: { input: TerminalWriteInput, output: z.void() },
   [RpcMethod.terminalResize]: { input: TerminalResizeInput, output: z.void() },

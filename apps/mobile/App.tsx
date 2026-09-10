@@ -335,7 +335,7 @@ function AppInner() {
         ) : tab === "files" ? (
           <FilesScreen client={client} />
         ) : tab === "terminal" ? (
-          <TerminalScreen client={client} />
+          <TerminalScreen client={client} serverLabel={active.label} />
         ) : tab === "scripts" ? (
           <ScriptsScreen client={client} />
         ) : tab === "services" ? (

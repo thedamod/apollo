@@ -1,35 +1,26 @@
 /**
- * Terminal surface — ported 1:1 from t3code
- * `apps/mobile/src/features/terminal/NativeTerminalSurface.tsx`.
+ * Terminal grid surface — renders the `VtParser` screen grid with full ANSI
+ * color/attribute fidelity (the t3code Ghostty view's job, in Expo-Go-safe
+ * RN Text).
  *
- * t3code renders through a native Ghostty view when available and falls back
- * to this text surface otherwise. This app ships Expo Go (no native modules),
- * so the fallback IS the surface — same props, same theme wiring, same
- * grid-size estimation, same Enter-as-CR + Ctrl-C composer.
+ * Same component contract as before (`TerminalSurface` + `estimateGridSize`);
+ * text input moved to the screen's hidden field, so this is render-only.
  */
-import { memo, useEffect, useRef } from "react";
-import {
-  Pressable,
-  ScrollView,
-  Text,
-  TextInput,
-  View,
-  type LayoutChangeEvent,
-  type StyleProp,
-  type ViewStyle,
-} from "react-native";
-import { useAppearancePreferences } from "../appearance/AppearanceContext";
+import { memo } from "react";
+import { Text, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from "react-native";
 import { getMobileTerminalTheme, type TerminalTheme } from "./terminalTheme";
+import { useAppearancePreferences } from "../appearance/AppearanceContext";
+import type { VtAttrs, VtCell, VtColorSpec, VtParser } from "./vtParser";
 
 export interface TerminalSurfaceProps {
   readonly terminalKey: string;
-  readonly buffer: string;
+  readonly parser: VtParser;
+  /** bumped whenever the parser advances — the grid mutates in place. */
+  readonly version: number;
   readonly fontSize?: number;
   readonly isRunning: boolean;
-  readonly keyboardFocusRequest?: number;
   readonly theme?: TerminalTheme;
   readonly style?: StyleProp<ViewStyle>;
-  readonly onInput: (data: string) => void;
   readonly onResize: (size: { readonly cols: number; readonly rows: number }) => void;
 }
 
@@ -46,15 +37,198 @@ export function estimateGridSize(input: {
   };
 }
 
-export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurfaceProps) {
+const MAX_RENDER_LINES = 250;
+
+const CUBE_STEPS = [0, 95, 135, 175, 215, 255];
+
+function hex(r: number, g: number, b: number): string {
+  const c = (v: number) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0");
+  return `#${c(r)}${c(g)}${c(b)}`;
+}
+
+function resolveSpec(spec: VtColorSpec, theme: TerminalTheme): string {
+  if (spec.kind === "rgb") return hex(spec.r, spec.g, spec.b);
+  const i = spec.index;
+  if (i >= 0 && i < theme.palette.length) return theme.palette[i];
+  if (i >= 16 && i < 232) {
+    const n = i - 16;
+    return hex(CUBE_STEPS[Math.floor(n / 36)], CUBE_STEPS[Math.floor((n % 36) / 6)], CUBE_STEPS[n % 6]);
+  }
+  if (i >= 232 && i < 256) {
+    const v = 8 + (i - 232) * 10;
+    return hex(v, v, v);
+  }
+  return theme.foreground;
+}
+
+interface RunStyle {
+  color: string;
+  backgroundColor?: string;
+  fontWeight?: "bold";
+  fontStyle?: "italic";
+  textDecorationLine?: "underline" | "line-through" | "underline line-through" | "none";
+  opacity?: number;
+}
+
+function styleKey(s: RunStyle): string {
+  return `${s.color}|${s.backgroundColor ?? ""}|${s.fontWeight ?? ""}|${s.fontStyle ?? ""}|${s.textDecorationLine ?? ""}|${s.opacity ?? ""}`;
+}
+
+function runStyleFor(attrs: VtAttrs, theme: TerminalTheme, defaultBg: string | null): RunStyle {
+  let fg = attrs.fg ? resolveSpec(attrs.fg, theme) : theme.foreground;
+  // xterm convention: bold + standard color renders as the bright variant.
+  if (attrs.bold && attrs.fg?.kind === "palette" && attrs.fg.index < 8) {
+    fg = resolveSpec({ kind: "palette", index: attrs.fg.index + 8 }, theme);
+  }
+  let bg = attrs.bg ? resolveSpec(attrs.bg, theme) : defaultBg ?? undefined;
+  if (attrs.inverse) {
+    const swappedFg = bg ?? theme.background;
+    const swappedBg = fg;
+    fg = swappedFg;
+    bg = swappedBg;
+  }
+  let decoration: "underline" | "line-through" | "underline line-through" | undefined;
+  if (attrs.underline && attrs.strike) decoration = "underline line-through";
+  else if (attrs.underline) decoration = "underline";
+  else if (attrs.strike) decoration = "line-through";
+  return {
+    color: fg,
+    ...(bg ? { backgroundColor: bg } : {}),
+    ...(attrs.bold ? { fontWeight: "bold" as const } : {}),
+    ...(attrs.italic ? { fontStyle: "italic" as const } : {}),
+    ...(decoration ? { textDecorationLine: decoration } : {}),
+    ...(attrs.dim ? { opacity: 0.65 } : {}),
+  };
+}
+
+interface Run {
+  text: string;
+  width: number;
+  widths: number[];
+  style: RunStyle;
+}
+
+function lineRuns(line: VtCell[], theme: TerminalTheme): Run[] {
+  const runs: Run[] = [];
+  let text = "";
+  let width = 0;
+  let widths: number[] = [];
+  let style: RunStyle | null = null;
+  let key = "";
+  const flush = () => {
+    if (style) runs.push({ text, width, widths, style });
+  };
+  for (const cell of line) {
+    if (cell.w === 0) continue; // wide-char trailing half
+    const cellStyle = runStyleFor(cell.attrs, theme, null);
+    const cellKey = styleKey(cellStyle);
+    if (style && cellKey === key) {
+      text += cell.ch;
+      width += cell.w;
+      widths.push(cell.w);
+    } else {
+      flush();
+      text = cell.ch;
+      width = cell.w;
+      widths = [cell.w];
+      style = cellStyle;
+      key = cellKey;
+    }
+  }
+  flush();
+  return runs;
+}
+
+function TerminalGridLine({
+  runs,
+  cursorCol,
+  cursorStyle,
+  fontSize,
+  lineHeight,
+}: {
+  runs: Run[];
+  cursorCol: number | null;
+  cursorStyle: RunStyle;
+  fontSize: number;
+  lineHeight: number;
+}) {
+  if (runs.length === 0) {
+    return (
+      <Text style={{ fontFamily: "monospace", fontSize, lineHeight }}>
+        {cursorCol === 0 ? <Text style={[{ fontFamily: "monospace", fontSize }, cursorStyle]}> </Text> : " "}
+      </Text>
+    );
+  }
+  let col = 0;
+  const children: React.ReactNode[] = [];
+  runs.forEach((run, ri) => {
+    const runStart = col;
+    const runEnd = col + run.width;
+    col = runEnd;
+    if (cursorCol === null || cursorCol < runStart || cursorCol >= runEnd) {
+      children.push(
+        <Text key={ri} style={[{ fontFamily: "monospace", fontSize }, run.style]}>
+          {run.text}
+        </Text>,
+      );
+      return;
+    }
+    // Split the run around the cursor column.
+    const chars = Array.from(run.text);
+    let used = 0;
+    let before = "";
+    let at = "";
+    let after = "";
+    for (let ci = 0; ci < chars.length; ci++) {
+      const ch = chars[ci];
+      const cw = run.widths[ci] ?? 1;
+      if (used + cw <= cursorCol - runStart) {
+        before += ch;
+        used += cw;
+      } else if (at === "") {
+        at = ch;
+        used += cw;
+      } else {
+        after += ch;
+      }
+    }
+    if (before) {
+      children.push(
+        <Text key={`${ri}-b`} style={[{ fontFamily: "monospace", fontSize }, run.style]}>
+          {before}
+        </Text>,
+      );
+    }
+    children.push(
+      <Text key={`${ri}-c`} style={[{ fontFamily: "monospace", fontSize }, cursorStyle]}>
+        {at || " "}
+      </Text>,
+    );
+    if (after) {
+      children.push(
+        <Text key={`${ri}-a`} style={[{ fontFamily: "monospace", fontSize }, run.style]}>
+          {after}
+        </Text>,
+      );
+    }
+  });
+  if (cursorCol !== null && cursorCol >= col) {
+    children.push(
+      <Text key="cursor-pad" style={[{ fontFamily: "monospace", fontSize }, cursorStyle]}>
+        {" "}
+      </Text>,
+    );
+  }
+  return (
+    <Text style={{ fontFamily: "monospace", fontSize, lineHeight }}>{children}</Text>
+  );
+}
+
+function TerminalSurfaceInner(props: TerminalSurfaceProps) {
   const fontSize = props.fontSize ?? 12;
-  const inputRef = useRef<TextInput>(null);
-  const scrollRef = useRef<ScrollView>(null);
+  const lineHeight = Math.round(fontSize * 1.35);
   const { themeAppearance, preferences } = useAppearancePreferences();
   const theme = props.theme ?? getMobileTerminalTheme(preferences.themeMode, themeAppearance);
-  const statusLabel = props.isRunning
-    ? "Connected — output streams live."
-    : "Open terminal to start a shell.";
 
   const handleLayout = (event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
@@ -63,105 +237,45 @@ export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurf
     }
   };
 
-  useEffect(() => {
-    if ((props.keyboardFocusRequest ?? 0) > 0) {
-      inputRef.current?.blur();
-      const focusFrame = requestAnimationFrame(() => inputRef.current?.focus());
-      return () => cancelAnimationFrame(focusFrame);
-    }
-
-    return undefined;
-  }, [props.keyboardFocusRequest]);
-
-  // Autoscroll to the bottom as output streams in (t3code's native surface
-  // pins to the cursor; the text fallback pins to the end).
-  useEffect(() => {
-    scrollRef.current?.scrollToEnd({ animated: false });
-  }, [props.buffer]);
+  const lines = props.parser.lines;
+  const start = Math.max(0, lines.length - MAX_RENDER_LINES);
+  const cursorStyle: RunStyle = {
+    color: theme.cursorBackground,
+    backgroundColor: theme.cursorForeground,
+  };
+  const showCursor = props.isRunning && props.parser.cursorVisible;
 
   return (
     <View
-      style={[
-        {
-          backgroundColor: theme.background,
-          borderRadius: 8,
-          overflow: "hidden",
-          flex: 1,
-        },
-        props.style,
-      ]}
+      style={[{ backgroundColor: theme.background, flex: 1 }, props.style]}
       onLayout={handleLayout}
     >
-      <View style={{ flex: 1, paddingHorizontal: 10, paddingVertical: 8 }}>
-        <Text style={{ color: theme.mutedForeground, fontSize: 11 }}>{statusLabel}</Text>
-        <ScrollView
-          ref={scrollRef}
-          style={{ flex: 1 }}
-          contentContainerStyle={{ paddingBottom: 12, paddingTop: 8 }}
-          showsVerticalScrollIndicator={false}
-        >
-          <Text
-            selectable
-            style={{
-              color: theme.foreground,
-              fontFamily: "monospace",
-              fontSize,
-              lineHeight: Math.round(fontSize * 1.35),
-            }}
-          >
-            {props.buffer || "$ "}
-          </Text>
-        </ScrollView>
-      </View>
-      <View
-        style={{
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 8,
-          borderTopWidth: 1,
-          borderTopColor: theme.border,
-          padding: 8,
-        }}
-      >
-        <TextInput
-          ref={inputRef}
-          autoCapitalize="none"
-          autoCorrect={false}
-          blurOnSubmit={false}
-          editable={props.isRunning}
-          placeholder="type and press return"
-          placeholderTextColor={theme.mutedForeground}
-          returnKeyType="send"
-          style={{
-            color: theme.foreground,
-            flex: 1,
-            fontFamily: "monospace",
-            fontSize: 14,
-            padding: 0,
-          }}
-          onSubmitEditing={(event) => {
-            const text = event.nativeEvent.text;
-            if (text.length > 0) {
-              // Terminal Enter is CR. LF is Ctrl+J and raw-mode TUIs can treat it as J.
-              props.onInput(`${text}\r`);
-              inputRef.current?.clear();
-            }
-          }}
-        />
-        <Pressable
-          disabled={!props.isRunning}
-          style={({ pressed }) => ({
-            opacity: !props.isRunning ? 0.35 : pressed ? 0.65 : 1,
-            paddingHorizontal: 10,
-            paddingVertical: 6,
-            borderRadius: 8,
-            backgroundColor: theme.border,
-          })}
-          onPress={() => props.onInput("\u0003")}
-        >
-          <Text style={{ color: theme.foreground, fontSize: 11, fontWeight: "700" }}>Ctrl-C</Text>
-        </Pressable>
-      </View>
+      {lines.slice(start).map((line, i) => {
+        const absoluteY = start + i;
+        const cursorCol =
+          showCursor && absoluteY === props.parser.cursorY ? props.parser.cursorX : null;
+        return (
+          <TerminalGridLine
+            key={`${props.terminalKey}:${absoluteY}`}
+            runs={lineRuns(line, theme)}
+            cursorCol={cursorCol}
+            cursorStyle={cursorStyle}
+            fontSize={fontSize}
+            lineHeight={lineHeight}
+          />
+        );
+      })}
     </View>
   );
-});
+}
+
+export const TerminalSurface = memo(
+  TerminalSurfaceInner,
+  (prev, next) =>
+    prev.version === next.version &&
+    prev.fontSize === next.fontSize &&
+    prev.theme === next.theme &&
+    prev.parser === next.parser &&
+    prev.isRunning === next.isRunning &&
+    prev.terminalKey === next.terminalKey,
+);

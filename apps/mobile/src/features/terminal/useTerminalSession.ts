@@ -57,17 +57,29 @@ export function useAttachedTerminalSession(input: {
   const [bufferState, setBufferState] = useState<TerminalBufferState>(EMPTY_TERMINAL_BUFFER_STATE);
   const [summary, setSummary] = useState<TerminalSummary | null>(null);
 
-  const channel = terminal ? `terminal:${sessionId}:${terminal.terminalId}` : null;
-  const attachKey = terminal
-    ? `${sessionId}:${terminal.terminalId}:${terminal.cwd}:${terminal.cols}x${terminal.rows}`
-    : null;
-  const prevKeyRef = useRef<string | null>(null);
+  const terminalId = terminal?.terminalId ?? null;
+  const channel = terminalId ? `terminal:${sessionId}:${terminalId}` : null;
+  // Identity key is session + terminal ONLY. Grid size, cwd, and env change
+  // over a session's life (keyboard open/close resizes the surface,
+  // metadata fills in the cwd) and must never resubscribe — resubscribing
+  // wipes the buffer back to version 0 and flashes "Starting shell…".
+  // Size updates travel via `terminal.resize`; the subscribe call below reads
+  // the latest size from a ref.
+  const attachKey = terminalId ? `${sessionId}:${terminalId}` : null;
+
+  const sizeRef = useRef({ cols: 80, rows: 24 });
+  sizeRef.current = {
+    cols: terminal?.cols ?? 80,
+    rows: terminal?.rows ?? 24,
+  };
+  const cwdRef = useRef(terminal?.cwd ?? "");
+  cwdRef.current = terminal?.cwd ?? "";
+  const envRef = useRef(terminal?.env);
+  envRef.current = terminal?.env;
 
   useEffect(() => {
-    if (!client || !terminal || !channel || attachKey === prevKeyRef.current) return;
-    prevKeyRef.current = attachKey;
+    if (!client || !terminalId || !channel || !attachKey) return;
     let cancelled = false;
-    let detach: (() => void) | null = null;
 
     setBufferState(EMPTY_TERMINAL_BUFFER_STATE);
     setSummary(null);
@@ -77,17 +89,19 @@ export function useAttachedTerminalSession(input: {
       const ev = payload as TerminalAttachStreamEvent & { snapshot?: { cwd?: string } };
       setBufferState((prev) => applyTerminalAttachStreamEvent(prev, ev));
       if ((ev.type === "snapshot" || ev.type === "restarted") && ev.snapshot) {
+        const snapshot = ev.snapshot;
+        const tid = terminalId;
         setSummary((prev) => ({
           sessionId,
-          terminalId: terminal.terminalId,
-          cwd: ev.snapshot.cwd ?? prev?.cwd ?? terminal.cwd,
-          status: ev.snapshot.status,
-          pid: ev.snapshot.pid,
-          exitCode: ev.snapshot.exitCode,
-          exitSignal: ev.snapshot.exitSignal,
+          terminalId: tid,
+          cwd: snapshot.cwd ?? prev?.cwd ?? cwdRef.current,
+          status: snapshot.status,
+          pid: snapshot.pid,
+          exitCode: snapshot.exitCode,
+          exitSignal: snapshot.exitSignal,
           hasRunningSubprocess: prev?.hasRunningSubprocess ?? false,
-          label: ev.snapshot.label,
-          updatedAt: ev.snapshot.updatedAt,
+          label: snapshot.label,
+          updatedAt: snapshot.updatedAt,
         }));
       } else if (ev.type === "activity" && "hasRunningSubprocess" in ev) {
         const a = ev as { hasRunningSubprocess: boolean; label: string };
@@ -102,14 +116,14 @@ export function useAttachedTerminalSession(input: {
         );
       }
     });
-    detach = off;
 
+    const { cols, rows } = sizeRef.current;
     client.subscribe("terminal.attach", {
       sessionId,
-      terminalId: terminal.terminalId,
-      ...(terminal.cols ? { cols: terminal.cols } : {}),
-      ...(terminal.rows ? { rows: terminal.rows } : {}),
-      ...(terminal.restartIfNotRunning ? { restartIfNotRunning: true } : {}),
+      terminalId,
+      ...(cols ? { cols } : {}),
+      ...(rows ? { rows } : {}),
+      restartIfNotRunning: true,
     });
 
     // If attach lands on a dead session without restart, explicitly open it —
@@ -117,18 +131,20 @@ export function useAttachedTerminalSession(input: {
     // Only when a cwd is known; otherwise the attach `restartIfNotRunning`
     // flag already lets the server open with the home directory.
     const staleTimer = setTimeout(async () => {
-      if (cancelled || !terminal.cwd) return;
+      if (cancelled) return;
       try {
         const list = (await client.call("terminal.list", { sessionId })) as TerminalSummary[];
-        const found = list.find((s) => s.terminalId === terminal.terminalId);
-        if (!found || found.status === "exited" || found.status === "error") {
+        const found = list.find((s) => s.terminalId === terminalId);
+        const cwd = cwdRef.current || found?.cwd || "";
+        if ((!found || found.status === "exited" || found.status === "error") && cwd) {
+          const size = sizeRef.current;
           await client.call("terminal.open", {
             sessionId,
-            terminalId: terminal.terminalId,
-            cwd: terminal.cwd,
-            cols: terminal.cols,
-            rows: terminal.rows,
-            ...(terminal.env ? { env: terminal.env } : {}),
+            terminalId,
+            cwd,
+            cols: size.cols,
+            rows: size.rows,
+            ...(envRef.current ? { env: envRef.current } : {}),
           });
         }
       } catch {}
@@ -137,10 +153,9 @@ export function useAttachedTerminalSession(input: {
     return () => {
       cancelled = true;
       clearTimeout(staleTimer);
-      detach?.();
-      prevKeyRef.current = null;
+      off();
     };
-  }, [attachKey, channel, client, sessionId, terminal]);
+  }, [attachKey, channel, client, sessionId, terminalId]);
 
   return useMemo(() => combineTerminalSessionState(summary, bufferState), [summary, bufferState]);
 }

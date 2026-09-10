@@ -1,21 +1,34 @@
 /**
- * Terminal screen — t3code `ThreadTerminalRouteScreen` ported 1:1 to this app.
+ * Terminal screen — t3code `ThreadTerminalRouteScreen` ported to this app.
  *
- * Same behavior, adapted to this stack (sessionId scoping, RpcClient, no
- * native Ghostty view — `TerminalSurface` is the text fallback t3code uses
- * when the native view is unavailable):
- *  - attach with cached grid size, `restartIfNotRunning` respawn
- *  - stale-reopen when the stream replays a dead session
- *  - running → exited transition falls back to the previous live session
- *  - toolbar: esc / ctrl-or-cmd+alt modifiers / tab / clear / arrows / ~ | / -
- *  - Ctrl modifier mapping (`a` → 0x01, `[` → ESC, …)
- *  - font-size stepper writing back to appearance prefs
- *  - buffer replay key so font-size changes don't flash stale grids
- *  - terminal tabs with server labels + status dots, new/close/restart/clear
+ * Layout mirrors t3code mobile 1:1: compact header with a terminal icon that
+ * opens a session popup beneath it (status, text size, terminal list, open
+ * new, restart, close), a VT grid surface (tap to focus = open keyboard),
+ * and a keyboard accessory row (`esc CTRL ALT tab CLEAR` + dismiss) that is
+ * only visible while the keyboard is open — plus a floating keyboard button
+ * when it is closed.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { Plus, RotateCcw, Trash2, X } from "lucide-react-native";
+import {
+  Keyboard,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Keyboard as KeyboardIcon,
+  Plus,
+  RotateCcw,
+  SquareTerminal,
+  Trash2,
+} from "lucide-react-native";
 import { DEFAULT_TERMINAL_ID } from "../lib/terminalProtocol";
 import { theme } from "../theme";
 import type { RpcClient } from "../lib/client";
@@ -23,12 +36,11 @@ import { useAppearancePreferences } from "../features/appearance/AppearanceConte
 import { TerminalSurface } from "../features/terminal/TerminalSurface";
 import { getMobileTerminalTheme } from "../features/terminal/terminalTheme";
 import {
-  getTerminalBufferReplayKey,
-  getTerminalSurfaceReplayBuffer,
-  TERMINAL_BUFFER_REPLAY_STABILITY_DELAY_MS,
-} from "../features/terminal/terminalBufferReplay";
+  MAX_TERMINAL_FONT_SIZE,
+  MIN_TERMINAL_FONT_SIZE,
+  normalizeTerminalFontSize,
+} from "../features/terminal/terminalPreferences";
 import {
-  basename,
   buildTerminalMenuSessions,
   getTerminalStatusLabel,
   nextOpenTerminalId,
@@ -40,6 +52,7 @@ import {
   cacheTerminalGridSize,
   getCachedTerminalGridSize,
 } from "../features/terminal/terminalUiState";
+import { VtParser } from "../features/terminal/vtParser";
 import {
   useAttachedTerminalSession,
   useKnownTerminalSessions,
@@ -48,16 +61,10 @@ import {
 const SESSION_ID = "mobile";
 const DEFAULT_TERMINAL_COLS = 80;
 const DEFAULT_TERMINAL_ROWS = 24;
+/** Sentinel keeps the hidden field non-empty so soft-keyboard backspace deletes. */
+const FIELD_SENTINEL = " ";
 
 type PendingModifier = "ctrl" | "meta";
-
-interface TerminalToolbarAction {
-  readonly kind: "send" | "clear" | "modifier";
-  readonly key: string;
-  readonly label: string;
-  readonly data?: string;
-  readonly modifier?: PendingModifier;
-}
 
 function applyCtrlModifier(input: string): string {
   const firstCharacter = input[0];
@@ -81,23 +88,7 @@ function applyCtrlModifier(input: string): string {
   return input;
 }
 
-const TOOLBAR_ACTIONS: ReadonlyArray<TerminalToolbarAction> = [
-  { kind: "send", key: "esc", label: "esc", data: "\u001b" },
-  { kind: "modifier", key: "ctrl", label: "ctrl", modifier: "ctrl" },
-  { kind: "modifier", key: "alt", label: "alt", modifier: "meta" },
-  { kind: "send", key: "tab", label: "tab", data: "\t" },
-  { kind: "clear", key: "clear", label: "clear" },
-  { kind: "send", key: "up", label: "↑", data: "\u001b[A" },
-  { kind: "send", key: "down", label: "↓", data: "\u001b[B" },
-  { kind: "send", key: "left", label: "←", data: "\u001b[D" },
-  { kind: "send", key: "right", label: "→", data: "\u001b[C" },
-  { kind: "send", key: "tilde", label: "~", data: "~" },
-  { kind: "send", key: "pipe", label: "|", data: "|" },
-  { kind: "send", key: "slash", label: "/", data: "/" },
-  { kind: "send", key: "dash", label: "-", data: "-" },
-];
-
-export function TerminalScreen({ client }: { client: RpcClient | null }) {
+export function TerminalScreen({ client, serverLabel }: { client: RpcClient | null; serverLabel: string }) {
   const {
     isReady: hasResolvedFontPreference,
     appearance,
@@ -109,21 +100,33 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
   const terminalTheme = getMobileTerminalTheme(preferences.themeMode, themeAppearance);
 
   const [terminalId, setTerminalId] = useState(DEFAULT_TERMINAL_ID);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [textSizeOpen, setTextSizeOpen] = useState(false);
+  const [pendingModifier, setPendingModifier] = useState<PendingModifier | null>(null);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [inputFocused, setInputFocused] = useState(false);
+  const [renderVersion, setRenderVersion] = useState(0);
+  const [field, setField] = useState(FIELD_SENTINEL);
+  const [error, setError] = useState<string | null>(null);
   const [lastGridSize, setLastGridSize] = useState(() =>
     getCachedTerminalGridSize({ sessionId: SESSION_ID, terminalId: DEFAULT_TERMINAL_ID }) ?? {
       cols: DEFAULT_TERMINAL_COLS,
       rows: DEFAULT_TERMINAL_ROWS,
     },
   );
-  const [pendingModifier, setPendingModifier] = useState<PendingModifier | null>(null);
-  const [keyboardFocusRequest, setKeyboardFocusRequest] = useState(0);
-  const [readyBufferReplayKey, setReadyBufferReplayKey] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
-  const bufferReplayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = useRef<TextInput>(null);
+  const scrollRef = useRef<ScrollView>(null);
+  const pinnedRef = useRef(true);
+  const parserRef = useRef<{ key: string; parser: VtParser; fed: number } | null>(null);
+  // Stable fallback so the memoized surface never sees a new parser identity.
+  const fallbackParserRef = useRef<VtParser | null>(null);
+  if (!fallbackParserRef.current) {
+    fallbackParserRef.current = new VtParser(DEFAULT_TERMINAL_COLS);
+  }
   const runningTerminalKeyRef = useRef<string | null>(null);
   const reopenedStaleTerminalKeyRef = useRef<string | null>(null);
-  const lastBufferReplayKeyRef = useRef<string | null>(null);
 
   const knownSessions = useKnownTerminalSessions({ client, sessionId: SESSION_ID });
 
@@ -137,6 +140,33 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
     setPendingModifier(null);
     reopenedStaleTerminalKeyRef.current = null;
   }, [terminalId]);
+
+  // Keyboard visibility drives the accessory row vs the floating button.
+  // Belt and suspenders: will+did events (some IMEs only send one pair) plus
+  // the input's own focus state, so the controls can never vanish entirely.
+  useEffect(() => {
+    const onShow = (e: { endCoordinates: { height: number } }) => {
+      setKeyboardVisible(true);
+      setKeyboardHeight(e.endCoordinates.height);
+    };
+    const onHide = () => {
+      setKeyboardVisible(false);
+    };
+    const showWill = Keyboard.addListener("keyboardWillShow", onShow);
+    const showDid = Keyboard.addListener("keyboardDidShow", onShow);
+    const hideWill = Keyboard.addListener("keyboardWillHide", onHide);
+    const hideDid = Keyboard.addListener("keyboardDidHide", onHide);
+    return () => {
+      showWill.remove();
+      showDid.remove();
+      hideWill.remove();
+      hideDid.remove();
+    };
+  }, []);
+
+  // Visible when the keyboard is up — or, as a fallback, whenever the input
+  // holds focus (covers IMEs that report no height / floating keyboards).
+  const controlsOpen = keyboardVisible || inputFocused;
 
   const terminalAttachInput = useMemo(
     () =>
@@ -153,8 +183,6 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
     [client, hasResolvedFontPreference, lastGridSize.cols, lastGridSize.rows, terminalId],
   );
 
-  // `cwd: ""` would violate the contract — the server opens with the home
-  // directory when `restartIfNotRunning` fires, so only cols/rows ride along.
   const attachInput = useMemo(
     () =>
       terminalAttachInput
@@ -177,19 +205,29 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
   });
 
   const terminalKey = `${SESSION_ID}:${terminalId}`;
-  const bufferReplayKey = useMemo(
-    () => getTerminalBufferReplayKey({ terminalKey, fontSize }),
-    [fontSize, terminalKey],
-  );
-  if (lastBufferReplayKeyRef.current === null) {
-    lastBufferReplayKeyRef.current = bufferReplayKey;
-  }
-  const terminalSurfaceBuffer = getTerminalSurfaceReplayBuffer({
-    buffer: terminal.buffer,
-    replayKey: bufferReplayKey,
-    readyReplayKey: readyBufferReplayKey,
-  });
   const isRunning = terminal.status === "running" || terminal.status === "starting";
+
+  // Feed PTY output incrementally into the VT grid. Snapshots/clears replace
+  // the buffer (it shrinks) — those reset the parser and replay from scratch.
+  useEffect(() => {
+    let entry = parserRef.current;
+    if (!entry || entry.key !== terminalKey) {
+      entry = { key: terminalKey, parser: new VtParser(lastGridSize.cols), fed: 0 };
+      parserRef.current = entry;
+    }
+    entry.parser.setCols(lastGridSize.cols);
+    if (terminal.buffer.length < entry.fed) {
+      entry.parser.feedSnapshot(terminal.buffer);
+    } else if (terminal.buffer.length > entry.fed) {
+      entry.parser.feed(terminal.buffer.slice(entry.fed));
+    } else {
+      return;
+    }
+    entry.fed = terminal.buffer.length;
+    setRenderVersion((v) => v + 1);
+  }, [lastGridSize.cols, terminal.buffer, terminal.version, terminalKey]);
+
+  const parser = parserRef.current?.parser ?? fallbackParserRef.current!;
 
   const terminalMenuSessions = useMemo<ReadonlyArray<TerminalMenuSession>>(
     () =>
@@ -216,9 +254,13 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
   );
 
   const cwd = terminal.summary?.cwd ?? null;
+  const statusLabel = getTerminalStatusLabel({
+    status: terminal.status,
+    hasRunningSubprocess: terminal.hasRunningSubprocess,
+  });
 
-  // Track running → exited transitions observed on this screen so typing
-  // `exit` falls back to the previous live session (t3code web drawer parity).
+  // Running → exited observed here: fall through to the previous live
+  // session instead of stranding the user on a dead shell.
   useEffect(() => {
     if (terminalAttachInput === null) {
       runningTerminalKeyRef.current = null;
@@ -243,8 +285,7 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
     }
   }, [isRunning, terminal.status, terminalAttachInput, terminalKey, terminalId, terminalMenuSessions]);
 
-  // Stale-reopen: the attach stream replays a dead snapshot without respawn —
-  // issue an explicit open so the session comes back (t3code parity).
+  // Stale-reopen: the attach stream replays a dead snapshot without respawn.
   useEffect(() => {
     if (isRunning || !client || !terminalAttachInput) {
       if (isRunning) reopenedStaleTerminalKeyRef.current = null;
@@ -260,8 +301,6 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
     }
     reopenedStaleTerminalKeyRef.current = terminalKey;
     if (!cwd) {
-      // No known cwd yet — attach with `restartIfNotRunning` already covers
-      // the respawn (server opens with the home directory).
       reopenedStaleTerminalKeyRef.current = null;
       return;
     }
@@ -279,27 +318,19 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
       });
   }, [client, cwd, isRunning, terminal.status, terminal.version, terminalAttachInput, terminalId, terminalKey]);
 
-  // Buffer replay stability (font-size transitions).
-  useEffect(() => {
-    if (lastBufferReplayKeyRef.current === bufferReplayKey) return;
-    lastBufferReplayKeyRef.current = bufferReplayKey;
-    if (bufferReplayTimerRef.current !== null) {
-      clearTimeout(bufferReplayTimerRef.current);
-      bufferReplayTimerRef.current = null;
-    }
-    setReadyBufferReplayKey(null);
-  }, [bufferReplayKey]);
+  const focusKeyboard = useCallback(() => {
+    inputRef.current?.focus();
+  }, []);
 
-  useEffect(
-    () => () => {
-      if (bufferReplayTimerRef.current !== null) clearTimeout(bufferReplayTimerRef.current);
-    },
-    [],
-  );
+  // Autofocus once on mount, like t3code's native surface.
+  useEffect(() => {
+    const timer = setTimeout(focusKeyboard, 400);
+    return () => clearTimeout(timer);
+  }, [focusKeyboard]);
 
   const writeInput = useCallback(
     (data: string) => {
-      if (!client || !isRunning) return;
+      if (!client || !isRunning || data.length === 0) return;
       client.call("terminal.write", { sessionId: SESSION_ID, terminalId, data }).catch((e) => {
         setError(e instanceof Error ? e.message : String(e));
       });
@@ -324,21 +355,49 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
     [pendingModifier, writeInput],
   );
 
-  const scheduleBufferReplayReady = useCallback(() => {
-    if (bufferReplayTimerRef.current !== null) clearTimeout(bufferReplayTimerRef.current);
-    const replayKey = bufferReplayKey;
-    bufferReplayTimerRef.current = setTimeout(() => {
-      bufferReplayTimerRef.current = null;
-      setReadyBufferReplayKey(replayKey);
-    }, TERMINAL_BUFFER_REPLAY_STABILITY_DELAY_MS);
-  }, [bufferReplayKey]);
+  /** Soft-keyboard typing arrives through the hidden field. */
+  const handleFieldChange = useCallback(
+    (next: string) => {
+      if (!isRunning) {
+        if (next !== FIELD_SENTINEL) setField(FIELD_SENTINEL);
+        return;
+      }
+      if (next.startsWith(FIELD_SENTINEL)) {
+        // Trailing newlines belong to the return key (onSubmitEditing sends
+        // them) — never double-send.
+        const added = next.slice(FIELD_SENTINEL.length).replace(/[\r\n]+$/, "");
+        if (added) {
+          handleInput(added.replace(/\r\n?/g, "\r").replace(/\n/g, "\r"));
+        }
+      } else if (next === "") {
+        handleInput("\u007f"); // backspace on the sentinel
+      } else {
+        handleInput(next);
+      }
+      if (next !== FIELD_SENTINEL) setField(FIELD_SENTINEL);
+    },
+    [handleInput, isRunning],
+  );
+
+  /** Hardware-keyboard special keys (soft keyboards rarely emit these). */
+  const handleKeyPress = useCallback(
+    ({ nativeEvent }: { nativeEvent: { key: string } }) => {
+      const map: Record<string, string> = {
+        Escape: "\u001b",
+        ArrowUp: "\u001b[A",
+        ArrowDown: "\u001b[B",
+        ArrowLeft: "\u001b[D",
+        ArrowRight: "\u001b[C",
+      };
+      const data = map[nativeEvent.key];
+      if (data) handleInput(data);
+    },
+    [handleInput],
+  );
 
   const handleResize = useCallback(
     (size: { readonly cols: number; readonly rows: number }) => {
       cacheTerminalGridSize({ sessionId: SESSION_ID, terminalId }, size);
-      if (readyBufferReplayKey !== bufferReplayKey) {
-        scheduleBufferReplayReady();
-      }
       if (size.cols === lastGridSize.cols && size.rows === lastGridSize.rows) return;
       setLastGridSize(size);
       if (!client || !isRunning) return;
@@ -346,27 +405,7 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
         .call("terminal.resize", { sessionId: SESSION_ID, terminalId, cols: size.cols, rows: size.rows })
         .catch(() => {});
     },
-    [bufferReplayKey, client, isRunning, lastGridSize.cols, lastGridSize.rows, readyBufferReplayKey, scheduleBufferReplayReady, terminalId],
-  );
-
-  const handleToolbarAction = useCallback(
-    (action: TerminalToolbarAction) => {
-      if (action.kind === "clear") {
-        if (!client) return;
-        client.call("terminal.clear", { sessionId: SESSION_ID, terminalId }).catch((e) => {
-          setError(e instanceof Error ? e.message : String(e));
-        });
-        return;
-      }
-      if (action.kind === "modifier" && action.modifier) {
-        setPendingModifier((prev) => (prev === action.modifier ? null : action.modifier!));
-        return;
-      }
-      if (action.kind === "send" && action.data) {
-        handleInput(action.data);
-      }
-    },
-    [client, handleInput, terminalId],
+    [client, isRunning, lastGridSize.cols, lastGridSize.rows, terminalId],
   );
 
   const openNewTerminal = useCallback(() => {
@@ -374,9 +413,10 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
       listedTerminalIds: terminalMenuSessions.map((s) => s.terminalId),
       activeRouteTerminalId: terminalId,
     });
+    setMenuOpen(false);
     setTerminalId(nextId);
-    setKeyboardFocusRequest((n) => n + 1);
-  }, [terminalId, terminalMenuSessions]);
+    focusKeyboard();
+  }, [focusKeyboard, terminalId, terminalMenuSessions]);
 
   const closeCurrentTerminal = useCallback(() => {
     if (!client) return;
@@ -387,6 +427,7 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
     client
       .call("terminal.close", { sessionId: SESSION_ID, terminalId })
       .then(() => {
+        setMenuOpen(false);
         setTerminalId(fallbackTerminalId ?? DEFAULT_TERMINAL_ID);
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
@@ -406,8 +447,19 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
         cols: lastGridSize.cols,
         rows: lastGridSize.rows,
       })
+      .then(() => setMenuOpen(false))
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [client, cwd, lastGridSize.cols, lastGridSize.rows, terminalId]);
+
+  const stepFontSize = useCallback(
+    (direction: -1 | 1) => {
+      const next = normalizeTerminalFontSize(
+        Math.round((fontSize + direction * 0.5) * 2) / 2,
+      );
+      setTerminalFontSize(Math.max(MIN_TERMINAL_FONT_SIZE, Math.min(MAX_TERMINAL_FONT_SIZE, next)));
+    },
+    [fontSize, setTerminalFontSize],
+  );
 
   if (!client) {
     return (
@@ -418,135 +470,228 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
     );
   }
 
-  const statusLabel = getTerminalStatusLabel({
-    status: terminal.status,
-    hasRunningSubprocess: terminal.hasRunningSubprocess,
-  });
-
   return (
     <View style={styles.root}>
-      <View style={styles.header}>
-        <View style={styles.headerTop}>
-          <Text style={styles.title}>Terminal</Text>
-          <View style={styles.headerActions}>
-            <Pressable
-              style={styles.iconBtn}
-              accessibilityLabel="Decrease terminal font size"
-              onPress={() => {
-                const next = Math.max(6, Math.round((fontSize - 0.5) * 2) / 2);
-                setTerminalFontSize(next);
-              }}
-            >
-              <Text style={styles.iconBtnLabel}>A−</Text>
+      <View style={styles.headerWrap}>
+        <View style={styles.headerRow}>
+          <View style={styles.headerTitle}>
+            <Text style={styles.title}>Terminal</Text>
+            <Text style={styles.subtitle} numberOfLines={1}>
+              {serverLabel}
+            </Text>
+          </View>
+          <Pressable
+            style={styles.iconBtn}
+            accessibilityLabel="Terminal menu"
+            onPress={() => setMenuOpen((v) => !v)}
+          >
+            <SquareTerminal size={20} color={theme.colors.foreground} />
+          </Pressable>
+        </View>
+
+        {menuOpen ? (
+          <View style={styles.popup}>
+            <Text style={styles.popupStatus}>{statusLabel}</Text>
+            <View style={styles.popupDivider} />
+            <Pressable style={styles.popupRow} onPress={() => setTextSizeOpen((v) => !v)}>
+              <Text style={styles.popupLabel}>Text size</Text>
+              {textSizeOpen ? (
+                <ChevronDown size={16} color={theme.colors.secondary} />
+              ) : (
+                <ChevronRight size={16} color={theme.colors.secondary} />
+              )}
             </Pressable>
-            <Text style={styles.fontSizeLabel}>{fontSize.toFixed(1)}</Text>
-            <Pressable
-              style={styles.iconBtn}
-              accessibilityLabel="Increase terminal font size"
-              onPress={() => {
-                const next = Math.min(14, Math.round((fontSize + 0.5) * 2) / 2);
-                setTerminalFontSize(next);
-              }}
-            >
-              <Text style={styles.iconBtnLabel}>A+</Text>
+            {textSizeOpen ? (
+              <View style={styles.stepperRow}>
+                <Pressable
+                  style={styles.stepBtn}
+                  accessibilityLabel="Decrease terminal font size"
+                  onPress={() => stepFontSize(-1)}
+                >
+                  <Text style={styles.stepLabel}>−</Text>
+                </Pressable>
+                <Text style={styles.stepValue}>{fontSize.toFixed(1)}</Text>
+                <Pressable
+                  style={styles.stepBtn}
+                  accessibilityLabel="Increase terminal font size"
+                  onPress={() => stepFontSize(1)}
+                >
+                  <Text style={styles.stepLabel}>+</Text>
+                </Pressable>
+              </View>
+            ) : null}
+            <View style={styles.popupDivider} />
+            {terminalMenuSessions.map((session) => (
+              <Pressable
+                key={session.terminalId}
+                style={styles.popupRow}
+                onPress={() => {
+                  setMenuOpen(false);
+                  setTerminalId(session.terminalId);
+                  focusKeyboard();
+                }}
+              >
+                <View style={styles.popupRowText}>
+                  <Text style={styles.popupLabel}>{session.displayLabel}</Text>
+                  <Text style={styles.popupSub} numberOfLines={1}>
+                    {getTerminalStatusLabel(session)} · {serverLabel}
+                  </Text>
+                </View>
+                {session.terminalId === terminalId ? (
+                  <Check size={18} color={theme.colors.foreground} />
+                ) : null}
+              </Pressable>
+            ))}
+            <View style={styles.popupDivider} />
+            <Pressable style={styles.popupRow} onPress={openNewTerminal}>
+              <View style={styles.popupRowText}>
+                <Text style={styles.popupLabel}>Open new terminal</Text>
+                <Text style={styles.popupSub} numberOfLines={2}>
+                  Start another shell in {serverLabel}
+                </Text>
+              </View>
+              <Plus size={18} color={theme.colors.secondary} />
             </Pressable>
-            <Pressable style={styles.iconBtn} accessibilityLabel="Restart terminal" onPress={restartCurrentTerminal}>
-              <RotateCcw size={15} color={theme.colors.foreground} />
+            <View style={styles.popupDivider} />
+            <Pressable style={styles.popupRow} onPress={restartCurrentTerminal}>
+              <View style={styles.popupRowText}>
+                <Text style={styles.popupLabel}>Restart terminal</Text>
+              </View>
+              <RotateCcw size={16} color={theme.colors.secondary} />
             </Pressable>
-            <Pressable style={styles.iconBtn} accessibilityLabel="Close terminal" onPress={closeCurrentTerminal}>
-              <Trash2 size={15} color={theme.colors.foreground} />
+            <Pressable style={styles.popupRow} onPress={closeCurrentTerminal}>
+              <View style={styles.popupRowText}>
+                <Text style={styles.popupLabel}>Close terminal</Text>
+              </View>
+              <Trash2 size={16} color={theme.colors.secondary} />
             </Pressable>
           </View>
-        </View>
-        <Text style={styles.subtitle} numberOfLines={1}>
-          {cwd ? basename(cwd) ?? cwd : "…"} • {statusLabel}
-          {terminal.hasRunningSubprocess ? " • Task running" : ""}
-        </Text>
-        {terminal.error ? <Text style={styles.error}>{terminal.error}</Text> : null}
-        {error ? <Text style={styles.error}>{error}</Text> : null}
+        ) : null}
       </View>
 
-      <ScrollView
-        horizontal
-        style={styles.tabs}
-        contentContainerStyle={styles.tabsContent}
-        showsHorizontalScrollIndicator={false}
+      {terminal.error ? <Text style={styles.error}>{terminal.error}</Text> : null}
+      {error ? <Text style={styles.error}>{error}</Text> : null}
+
+      {menuOpen ? (
+        <Pressable
+          style={styles.backdrop}
+          accessibilityLabel="Close terminal menu"
+          onPress={() => setMenuOpen(false)}
+        />
+      ) : null}
+
+      <Pressable
+        style={styles.surfaceWrap}
+        onPress={focusKeyboard}
+        disabled={!isRunning}
       >
-        {terminalMenuSessions.map((session) => {
-          const active = session.terminalId === terminalId;
-          const dot =
-            session.status === "running"
-              ? session.hasRunningSubprocess
-                ? "#ff9f0a"
-                : "#30d158"
-              : session.status === "starting"
-                ? "#0a84ff"
-                : session.status === "error"
-                  ? "#ff453a"
-                  : theme.colors.muted;
-          return (
+        <ScrollView
+          ref={scrollRef}
+          style={styles.surfaceScroll}
+          contentContainerStyle={styles.surfaceContent}
+          showsVerticalScrollIndicator={false}
+          scrollEventThrottle={16}
+          onScroll={(e) => {
+            const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+            pinnedRef.current =
+              contentOffset.y + layoutMeasurement.height >= contentSize.height - 40;
+          }}
+          onContentSizeChange={() => {
+            if (pinnedRef.current) scrollRef.current?.scrollToEnd({ animated: false });
+          }}
+        >
+          <TerminalSurface
+            terminalKey={terminalKey}
+            parser={parser}
+            version={renderVersion}
+            fontSize={fontSize}
+            isRunning={isRunning}
+            theme={terminalTheme}
+            onResize={handleResize}
+          />
+          {!isRunning && terminal.version === 0 ? (
+            <Text style={styles.dim}>Starting shell…</Text>
+          ) : null}
+        </ScrollView>
+      </Pressable>
+
+      {/* Hidden field carries soft-keyboard input straight to the PTY. */}
+      <TextInput
+        ref={inputRef}
+        value={field}
+        onChangeText={handleFieldChange}
+        onKeyPress={handleKeyPress}
+        onSubmitEditing={() => handleInput("\r")}
+        autoCapitalize="none"
+        autoCorrect={false}
+        blurOnSubmit={false}
+        returnKeyType="send"
+        style={styles.hiddenInput}
+      />
+
+      {keyboardVisible ? (
+        // iOS overlays the keyboard, so the accessory needs bottom padding
+        // to sit flush above it. Android already accounts for the keyboard
+        // (resize/pan) — a marginBottom here inflates layout and the OS
+        // overshoots, floating the buttons way above the keyboard.
+        <View style={[styles.accessory, Platform.OS === "ios" ? { paddingBottom: keyboardHeight } : null]}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.accessoryContent}
+          >
+            <Pressable style={styles.pill} onPress={() => handleInput("\u001b")}>
+              <Text style={styles.pillLabel}>esc</Text>
+            </Pressable>
             <Pressable
-              key={session.terminalId}
-              style={[styles.tab, active && styles.tabActive]}
-              onPress={() => setTerminalId(session.terminalId)}
+              style={[styles.pill, pendingModifier === "ctrl" && styles.pillActive]}
+              onPress={() => setPendingModifier((p) => (p === "ctrl" ? null : "ctrl"))}
             >
-              <View style={[styles.dot, { backgroundColor: dot }]} />
-              <Text style={[styles.tabLabel, active && styles.tabLabelActive]} numberOfLines={1}>
-                {session.displayLabel}
+              <Text style={[styles.pillLabel, pendingModifier === "ctrl" && styles.pillLabelActive]}>
+                CTRL
               </Text>
             </Pressable>
-          );
-        })}
-        <Pressable style={styles.newTab} accessibilityLabel="Open another shell" onPress={openNewTerminal}>
-          <Plus size={15} color={theme.colors.secondary} />
-        </Pressable>
-      </ScrollView>
-
-      <View style={styles.surfaceWrap}>
-        <TerminalSurface
-          terminalKey={terminalKey}
-          buffer={terminalSurfaceBuffer}
-          fontSize={fontSize}
-          isRunning={isRunning}
-          keyboardFocusRequest={keyboardFocusRequest}
-          theme={terminalTheme}
-          onInput={handleInput}
-          onResize={handleResize}
-        />
-      </View>
-
-      <View style={styles.toolbar}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.toolbarContent}>
-          {TOOLBAR_ACTIONS.map((action) => {
-            const selected =
-              action.kind === "modifier" && pendingModifier === action.modifier;
-            return (
-              <Pressable
-                key={action.key}
-                style={[styles.toolBtn, selected && styles.toolBtnSelected]}
-                onPress={() => handleToolbarAction(action)}
-              >
-                <Text style={[styles.toolLabel, selected && styles.toolLabelSelected]}>
-                  {action.label}
-                </Text>
-              </Pressable>
-            );
-          })}
-          <Pressable
-            style={styles.toolBtn}
-            onPress={() => setKeyboardFocusRequest((n) => n + 1)}
-          >
-            <Text style={styles.toolLabel}>⌨</Text>
-          </Pressable>
-        </ScrollView>
-      </View>
-
-      {pendingModifier ? (
-        <Pressable style={styles.modifierBanner} onPress={() => setPendingModifier(null)}>
-          <X size={12} color={theme.colors.secondary} />
-          <Text style={styles.modifierText}>
-            {pendingModifier === "ctrl" ? "ctrl" : "alt"} held — next key is modified
-          </Text>
+            <Pressable
+              style={[styles.pill, pendingModifier === "meta" && styles.pillActive]}
+              onPress={() => setPendingModifier((p) => (p === "meta" ? null : "meta"))}
+            >
+              <Text style={[styles.pillLabel, pendingModifier === "meta" && styles.pillLabelActive]}>
+                ALT
+              </Text>
+            </Pressable>
+            <Pressable style={styles.pill} onPress={() => handleInput("\t")}>
+              <Text style={styles.pillLabel}>tab</Text>
+            </Pressable>
+            <Pressable
+              style={styles.pill}
+              onPress={() => {
+                if (!client) return;
+                client
+                  .call("terminal.clear", { sessionId: SESSION_ID, terminalId })
+                  .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+              }}
+            >
+              <Text style={styles.pillLabel}>CLEAR</Text>
+            </Pressable>
+            <Pressable
+              style={styles.dismissBtn}
+              accessibilityLabel="Dismiss keyboard"
+              onPress={() => {
+                inputRef.current?.blur();
+                Keyboard.dismiss();
+              }}
+            >
+              <KeyboardIcon size={18} color={theme.colors.foreground} />
+            </Pressable>
+          </ScrollView>
+        </View>
+      ) : isRunning ? (
+        <Pressable
+          style={styles.fab}
+          accessibilityLabel="Open keyboard"
+          onPress={focusKeyboard}
+        >
+          <KeyboardIcon size={22} color="#0b0b0c" />
         </Pressable>
       ) : null}
     </View>
@@ -554,62 +699,119 @@ export function TerminalScreen({ client }: { client: RpcClient | null }) {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.colors.screen, padding: 16, gap: 10 },
-  header: { gap: 4 },
-  headerTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  title: { color: theme.colors.foreground, fontSize: 26, fontFamily: theme.font.bold },
-  headerActions: { flexDirection: "row", alignItems: "center", gap: 6 },
+  root: { flex: 1, backgroundColor: theme.colors.screen, padding: 16, gap: 8 },
+  headerWrap: { zIndex: 10 },
+  headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  headerTitle: { flex: 1, gap: 2 },
+  title: { color: theme.colors.foreground, fontSize: 20, fontFamily: theme.font.bold },
+  subtitle: { color: theme.colors.secondary, fontSize: 12, fontFamily: theme.font.regular },
   iconBtn: {
-    backgroundColor: theme.colors.card,
     borderColor: theme.colors.border,
     borderWidth: 1,
-    borderRadius: 10,
-    minWidth: 34,
+    borderRadius: 999,
+    width: 42,
+    height: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: theme.colors.card,
+  },
+  popup: {
+    position: "absolute",
+    top: 50,
+    right: 0,
+    width: 300,
+    maxWidth: "90%",
+    backgroundColor: theme.colors.cardAlt,
+    borderColor: theme.colors.border,
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingVertical: 6,
+    elevation: 8,
+    shadowColor: "#000",
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  popupStatus: {
+    color: theme.colors.secondary,
+    fontSize: 13,
+    fontFamily: theme.font.regular,
+    textAlign: "center",
+    paddingVertical: 8,
+  },
+  popupDivider: { height: 1, backgroundColor: theme.colors.border },
+  popupRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  popupRowText: { flex: 1, gap: 2 },
+  popupLabel: { color: theme.colors.foreground, fontSize: 15, fontFamily: theme.font.medium },
+  popupSub: { color: theme.colors.secondary, fontSize: 12, fontFamily: theme.font.regular },
+  stepperRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 16, paddingVertical: 10 },
+  stepBtn: {
+    backgroundColor: theme.colors.card,
+    borderRadius: 8,
+    width: 34,
     height: 34,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 8,
   },
-  iconBtnLabel: { color: theme.colors.foreground, fontFamily: theme.font.bold, fontSize: 13 },
-  fontSizeLabel: { color: theme.colors.secondary, fontFamily: "monospace", fontSize: 12, minWidth: 30, textAlign: "center" },
-  subtitle: { color: theme.colors.secondary, fontSize: 13, fontFamily: theme.font.regular },
+  stepLabel: { color: theme.colors.foreground, fontSize: 18, fontFamily: theme.font.bold },
+  stepValue: { color: theme.colors.foreground, fontFamily: "monospace", fontSize: 14, minWidth: 44, textAlign: "center" },
   error: { color: theme.colors.danger, fontFamily: theme.font.regular, fontSize: 12 },
-  tabs: { maxHeight: 40, flexGrow: 0 },
-  tabsContent: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 2 },
-  tab: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: theme.colors.card,
-    borderColor: theme.colors.border,
-    borderWidth: 1,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    maxWidth: 180,
+  dim: { color: theme.colors.secondary, fontFamily: theme.font.regular, fontSize: 14 },
+  surfaceWrap: { flex: 1 },
+  surfaceScroll: { flex: 1 },
+  surfaceContent: { paddingVertical: 8, flexGrow: 1 },
+  hiddenInput: { position: "absolute", width: 1, height: 1, opacity: 0 },
+  backdrop: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 5,
   },
-  tabActive: { borderColor: "rgba(255,255,255,0.22)" },
-  tabLabel: { color: theme.colors.secondary, fontSize: 13, fontFamily: theme.font.medium },
-  tabLabelActive: { color: theme.colors.foreground },
-  dot: { width: 7, height: 7, borderRadius: 99 },
-  newTab: {
-    backgroundColor: theme.colors.card,
+  accessory: { marginHorizontal: -16, paddingHorizontal: 12 },
+  accessoryContent: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 6 },
+  pill: {
+    backgroundColor: theme.colors.cardAlt,
     borderColor: theme.colors.border,
     borderWidth: 1,
     borderRadius: 999,
-    width: 32,
-    height: 32,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  pillActive: { borderColor: "rgba(255,255,255,0.35)" },
+  pillLabel: { color: theme.colors.foreground, fontSize: 14, fontFamily: theme.font.medium },
+  pillLabelActive: { fontFamily: theme.font.bold },
+  dismissBtn: {
+    backgroundColor: theme.colors.cardAlt,
+    borderColor: theme.colors.border,
+    borderWidth: 1,
+    borderRadius: 999,
+    width: 44,
+    height: 44,
     alignItems: "center",
     justifyContent: "center",
   },
-  surfaceWrap: { flex: 1, minHeight: 280 },
-  toolbar: { backgroundColor: theme.colors.card, borderRadius: 12, borderColor: theme.colors.border, borderWidth: 1 },
-  toolbarContent: { flexDirection: "row", alignItems: "center", gap: 4, padding: 6 },
-  toolBtn: { borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9, backgroundColor: "transparent" },
-  toolBtnSelected: { backgroundColor: theme.colors.cardAlt, borderColor: "rgba(255,255,255,0.18)", borderWidth: 1 },
-  toolLabel: { color: theme.colors.secondary, fontFamily: "monospace", fontSize: 13 },
-  toolLabelSelected: { color: theme.colors.foreground },
-  modifierBanner: { flexDirection: "row", alignItems: "center", gap: 6, justifyContent: "center", paddingVertical: 4 },
-  modifierText: { color: theme.colors.secondary, fontSize: 12, fontFamily: theme.font.regular },
-  dim: { color: theme.colors.secondary, fontFamily: theme.font.regular, fontSize: 14 },
+  fab: {
+    position: "absolute",
+    right: 20,
+    bottom: 24,
+    width: 54,
+    height: 54,
+    borderRadius: 999,
+    backgroundColor: "#f5f5f5",
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 6,
+    shadowColor: "#000",
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+  },
 });

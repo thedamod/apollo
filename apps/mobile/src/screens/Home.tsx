@@ -11,13 +11,12 @@ import {
   HardDrive,
   Laptop,
   MemoryStick,
-  Wifi,
 } from "lucide-react-native";
 import { theme } from "../theme";
 import { formatBytes, formatUptimeShort, greetingFor } from "../lib/format";
 import { Card } from "../components/Card";
 import { StatTile } from "../components/StatTile";
-import { ActivityList, type ActivityItem } from "../components/ActivityList";
+import { type ActivityItem } from "../components/ActivityList";
 
 export interface HomeData {
   serverName: string;
@@ -153,31 +152,6 @@ export function HomeScreen({
           history={data.uptimeHistory}
         />
       </View>
-
-      <Card style={styles.tsCard}>
-        <View style={styles.tsRow}>
-          <View style={styles.tsIconWrap}>
-            <Wifi size={28} color={theme.colors.foreground} strokeWidth={1.8} />
-          </View>
-          <View style={styles.tsMeta}>
-            <Text style={styles.tsTitle}>Tailscale</Text>
-            <Text style={[styles.tsStatus, { color: data.connected ? theme.colors.cpu : theme.colors.danger }]}>
-              ● {data.connected ? "Connected" : "Offline"}
-            </Text>
-          </View>
-          <Text style={styles.tsIp}>{data.tailscaleIp}</Text>
-          <ChevronRight size={20} color={theme.colors.chevron} />
-        </View>
-      </Card>
-
-      <View style={styles.sectionHead}>
-        <Text style={styles.sectionTitle}>Recent Activity</Text>
-        <Pressable style={styles.seeAllBtn}>
-          <Text style={styles.seeAll}>See all</Text>
-          <ChevronRight size={16} color={theme.colors.link} />
-        </Pressable>
-      </View>
-      <ActivityList items={data.activity} />
     </ScrollView>
   );
 }
@@ -189,7 +163,15 @@ const styles = StyleSheet.create({
   hello: { flex: 1 },
   greet: { color: theme.colors.secondary, fontSize: 22, fontFamily: theme.font.regular },
   name: { color: theme.colors.foreground, fontSize: 44, fontFamily: theme.font.bold, marginTop: -4 },
-  serverCard: { paddingVertical: 18 },
+  serverCard: {
+    backgroundColor: "transparent",
+    borderWidth: 0,
+    borderRadius: 0,
+    paddingHorizontal: 0,
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: theme.colors.border,
+  },
   serverRow: { flexDirection: "row", alignItems: "center" },
   serverIconWrap: { marginRight: 12 },
   serverMeta: { flex: 1 },
@@ -207,15 +189,4 @@ const styles = StyleSheet.create({
   },
   detailsLabel: { color: theme.colors.foreground, fontSize: 13, fontFamily: theme.font.medium },
   grid: { flexDirection: "row", gap: 12 },
-  tsCard: { paddingVertical: 18 },
-  tsRow: { flexDirection: "row", alignItems: "center" },
-  tsIconWrap: { marginRight: 12 },
-  tsMeta: { flex: 1 },
-  tsTitle: { color: theme.colors.foreground, fontSize: 17, fontFamily: theme.font.bold },
-  tsStatus: { fontSize: 14, fontFamily: theme.font.medium, marginTop: 2 },
-  tsIp: { color: theme.colors.secondary, fontSize: 14, fontFamily: theme.font.regular },
-  sectionHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 8 },
-  sectionTitle: { color: theme.colors.foreground, fontSize: 22, fontFamily: theme.font.bold },
-  seeAllBtn: { flexDirection: "row", alignItems: "center" },
-  seeAll: { color: theme.colors.link, fontSize: 15, fontFamily: theme.font.medium },
 });

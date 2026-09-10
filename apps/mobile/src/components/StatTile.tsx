@@ -1,7 +1,6 @@
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 import type { LucideIcon } from "lucide-react-native";
-import { ChevronRight } from "lucide-react-native";
 import { theme } from "../theme";
 import { Card } from "./Card";
 import { Sparkline } from "./Sparkline";
@@ -35,7 +34,6 @@ export function StatTile({
           <Text style={styles.label}>{label}</Text>
           <Text style={styles.value}>{value}</Text>
         </View>
-        <ChevronRight size={20} color={theme.colors.chevron} />
       </View>
       {sub ? <Text style={styles.sub}>{sub}</Text> : null}
       <View style={styles.spark}>
@@ -46,7 +44,19 @@ export function StatTile({
 }
 
 const styles = StyleSheet.create({
-  tile: { flex: 1, minWidth: 0 },
+  // flat stat block, not a card: no rounded box, no raised fill —
+  // matches the flattened home rows (hairline divider only)
+  tile: {
+    flex: 1,
+    minWidth: 0,
+    backgroundColor: "transparent",
+    borderWidth: 0,
+    borderRadius: 0,
+    paddingHorizontal: 0,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: theme.colors.border,
+  },
   row: { flexDirection: "row", alignItems: "flex-start" },
   iconWrap: { marginRight: 10, marginTop: 3 },
   meta: { flex: 1 },

@@ -14,7 +14,7 @@ import {
   Wifi,
 } from "lucide-react-native";
 import { theme } from "../theme";
-import { formatBytes, formatUptimeShort, greetingFor, looksLikeTailscale } from "../lib/format";
+import { formatBytes, formatUptimeShort, greetingFor } from "../lib/format";
 import { Card } from "../components/Card";
 import { StatTile } from "../components/StatTile";
 import { ActivityList, type ActivityItem } from "../components/ActivityList";
@@ -82,7 +82,6 @@ export function statsToHome(s: {
 
 export function HomeScreen({
   data,
-  hostLabel,
   userName = "Aether",
   onViewDetails,
 }: {
@@ -91,25 +90,13 @@ export function HomeScreen({
   userName?: string;
   onViewDetails?: () => void;
 }) {
-  const viaTailscale = looksLikeTailscale(hostLabel) || looksLikeTailscale(data.tailscaleIp);
   return (
     <ScrollView style={styles.root} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <View style={styles.header}>
         <View style={styles.hello}>
           <Text style={styles.greet}>{greetingFor()},</Text>
           <Text style={styles.name}>{userName}</Text>
-          <Text style={styles.tagline}>Your server is running smoothly.</Text>
         </View>
-        <Card style={styles.connPill}>
-          <View style={styles.connRow}>
-            <View style={[styles.dot, { backgroundColor: data.connected ? theme.colors.dotOnline : theme.colors.danger }]} />
-            <View>
-              <Text style={styles.connTitle}>{data.connected ? "Connected" : "Offline"}</Text>
-              <Text style={styles.connSub}>{viaTailscale ? "via Tailscale" : hostLabel}</Text>
-            </View>
-            <ChevronRight size={18} color={theme.colors.chevron} />
-          </View>
-        </Card>
       </View>
 
       <Card style={styles.serverCard}>
@@ -202,12 +189,6 @@ const styles = StyleSheet.create({
   hello: { flex: 1 },
   greet: { color: theme.colors.secondary, fontSize: 22, fontFamily: theme.font.regular },
   name: { color: theme.colors.foreground, fontSize: 44, fontFamily: theme.font.bold, marginTop: -4 },
-  tagline: { color: theme.colors.secondary, fontSize: 14, fontFamily: theme.font.regular, marginTop: 4 },
-  connPill: { paddingVertical: 12, paddingHorizontal: 14, minWidth: 150 },
-  connRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  dot: { width: 14, height: 14, borderRadius: 7 },
-  connTitle: { color: theme.colors.foreground, fontSize: 14, fontFamily: theme.font.bold },
-  connSub: { color: theme.colors.secondary, fontSize: 12, fontFamily: theme.font.regular },
   serverCard: { paddingVertical: 18 },
   serverRow: { flexDirection: "row", alignItems: "center" },
   serverIconWrap: { marginRight: 12 },

@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Aether",
+    "slug": "aether-home-server",
+    "scheme": "aether",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0b0b0c"
+    },
+    "ios": {
+      "bundleIdentifier": "gg.home.aether",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Allow Aether to connect to your home server on your local network or tailnet.",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        }
+      }
+    },
+    "android": {
+      "package": "gg.home.aether",
+      "usesCleartextTraffic": true
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-font",
+      "expo-status-bar"
+    ]
+  }
+}

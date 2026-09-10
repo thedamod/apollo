@@ -18,7 +18,7 @@ export type TabKey = "home" | "files" | "terminal" | "scripts" | "services" | "s
 /**
  * Bottom dock styled after `context/glass-tabs` (react-native-glass-tabs):
  * floating pill, frosted-glass background, animated active selector,
- * 12px labels (medium when focused), badge support, haptic tap.
+ * badge support, haptic tap. Icon-only (no text labels).
  *
  * Adapted to our constraints: pure JS (no native GlassBarView — works in
  * Expo Go), dark-theme tokens (white active @ low-alpha selector instead of
@@ -27,7 +27,7 @@ export type TabKey = "home" | "files" | "terminal" | "scripts" | "services" | "s
  *
  * Spec reference — glass-tabs DEFAULTS:
  *   bar height 56, cornerRadius 28, maxWidth 344, margin 8,
- *   icon 20, label 12, selector = primary @ 0.09 alpha scaling 0.6→1
+ *   icon 20, selector = primary @ 0.09 alpha scaling 0.6→1
  *   over 320ms, badge #FF3B30 circle, dark bg #1C1C1E @ 0.85.
  */
 const TABS: Array<{ key: TabKey; icon: LucideIcon; label: string; badge?: number }> = [
@@ -95,12 +95,6 @@ function GlassTabItem({
           </View>
         ) : null}
       </View>
-      <Text
-        style={[styles.label, { color, fontFamily: focused ? theme.font.medium : theme.font.regular }]}
-        numberOfLines={1}
-      >
-        {tab.label}
-      </Text>
     </Pressable>
   );
 }
@@ -130,7 +124,7 @@ const styles = StyleSheet.create({
   bar: {
     flexDirection: "row",
     alignItems: "center",
-    height: 64,
+    height: 58,
     width: "100%",
     maxWidth: 420, // glass-tabs caps at 344 for 3–5 tabs; we carry 6
     backgroundColor: "rgba(28,28,30,0.85)", // glass-tabs DARK_BACKGROUND @ OPACITY
@@ -145,7 +139,6 @@ const styles = StyleSheet.create({
     height: "100%",
     justifyContent: "center",
     alignItems: "center",
-    gap: 3, // glass-tabs label marginTop 3
   },
   selector: {
     position: "absolute",
@@ -170,5 +163,4 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
   },
   badgeText: { color: "#fff", fontSize: 10, fontFamily: theme.font.bold, textAlign: "center" },
-  label: { fontSize: 12 }, // glass-tabs LABEL_FONT_SIZE
 });

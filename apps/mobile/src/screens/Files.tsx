@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Image,
   Linking,
   Modal,
+  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -13,10 +14,11 @@ import {
   View,
 } from "react-native";
 import {
+  ArrowLeft,
   ChevronRight,
-  CornerUpLeft,
   Download,
   Eye,
+  EyeOff,
   File,
   FileArchive,
   FileCode,
@@ -27,7 +29,6 @@ import {
   Film,
   Folder,
   FolderPlus,
-  FilePlus,
   Info,
   Music,
   Pencil,
@@ -42,6 +43,8 @@ import * as DocumentPicker from "expo-document-picker";
 import { File as ExpoFile, Paths, UploadType } from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { VideoView, useVideoPlayer } from "expo-video";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { SvgUri } from "react-native-svg";
 import { theme } from "../theme";
 import type { RpcClient } from "../lib/client";
 import { formatBytes } from "../lib/format";
@@ -60,13 +63,13 @@ import {
   type FileStat,
   type TextPreview,
 } from "../lib/files";
-import { Card } from "../components/Card";
+import { highlightCode, type HighlightedLine } from "../lib/shiki";
 
 const PAGE_SIZE = 500;
 /** Max lines rendered in the text preview (t3code virtualizes; v1 caps). */
 const MAX_RENDER_LINES = 2000;
 
-/** Full NAS-style file explorer over `filesystem.*` RPC + `/api/files/*` HTTP. */
+/** NAS-style file browser over `filesystem.*` RPC + `/api/files/*` HTTP. */
 export function FilesScreen({ client }: { client: RpcClient | null }) {
   const [path, setPath] = useState<string>("");
   const [entries, setEntries] = useState<ExplorerEntry[]>([]);
@@ -85,9 +88,6 @@ export function FilesScreen({ client }: { client: RpcClient | null }) {
   const [renameName, setRenameName] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<ExplorerEntry | null>(null);
   const [detailsTarget, setDetailsTarget] = useState<ExplorerEntry | null>(null);
-  const [newTextOpen, setNewTextOpen] = useState(false);
-  const [newTextName, setNewTextName] = useState("");
-  const [newTextContent, setNewTextContent] = useState("");
   const [mutating, setMutating] = useState(false);
   const [uploading, setUploading] = useState<string | null>(null);
 
@@ -197,30 +197,6 @@ export function FilesScreen({ client }: { client: RpcClient | null }) {
     }
   }, [client, deleteTarget, path, browse]);
 
-  const doCreateTextFile = useCallback(async () => {
-    if (!client || !profile || !newTextName.trim()) return;
-    setMutating(true);
-    try {
-      const res = await fetch(uploadUrl(profile.baseUrl, path || "/", newTextName.trim()), {
-        method: "POST",
-        headers: { ...authHeaders(profile.token), "Content-Type": "text/plain; charset=utf-8" },
-        body: newTextContent,
-      });
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(`Upload failed (HTTP ${res.status}) ${body.slice(0, 200)}`);
-      }
-      setNewTextOpen(false);
-      setNewTextName("");
-      setNewTextContent("");
-      await browse(path || "");
-    } catch (e) {
-      Alert.alert("Create file failed", e instanceof Error ? e.message : String(e));
-    } finally {
-      setMutating(false);
-    }
-  }, [client, profile, newTextName, newTextContent, path, browse]);
-
   const pickAndUpload = useCallback(async () => {
     if (!profile) return;
     try {
@@ -294,20 +270,49 @@ export function FilesScreen({ client }: { client: RpcClient | null }) {
 
   if (!client || !profile) return <Placeholder label="Connect to browse files" />;
 
+  const canGoUp = path !== "/" && path !== "";
+
   return (
     <View style={styles.root}>
-      <Text style={styles.title}>Files</Text>
-      <Text style={styles.path} numberOfLines={1}>
-        {path || "…"}
-      </Text>
-
-      <View style={styles.toolbar}>
-        <ToolbarButton icon={<RefreshCw size={17} color={theme.colors.secondary} />} label="Refresh" onPress={refresh} />
-        <ToolbarButton icon={<Eye size={17} color={includeHidden ? theme.colors.link : theme.colors.secondary} />} label={includeHidden ? "Hiding hidden" : "Show hidden"} onPress={toggleHidden} />
-        <ToolbarButton icon={<FolderPlus size={17} color={theme.colors.secondary} />} label="New folder" onPress={() => setMkdirOpen(true)} />
-        <ToolbarButton icon={<FilePlus size={17} color={theme.colors.secondary} />} label="New file" onPress={() => setNewTextOpen(true)} />
-        <ToolbarButton icon={<Upload size={17} color={theme.colors.secondary} />} label={uploading ? "Working…" : "Upload"} onPress={pickAndUpload} />
+      <View style={styles.headerRow}>
+        <Text style={styles.title}>Files</Text>
+        <View style={styles.headerActions}>
+          <CircleButton label="Refresh" onPress={refresh}>
+            <RefreshCw size={17} color={theme.colors.secondary} />
+          </CircleButton>
+          <CircleButton label={includeHidden ? "Hide hidden files" : "Show hidden files"} onPress={toggleHidden}>
+            {includeHidden ? (
+              <Eye size={17} color={theme.colors.link} />
+            ) : (
+              <EyeOff size={17} color={theme.colors.secondary} />
+            )}
+          </CircleButton>
+          <CircleButton label="New folder" onPress={() => setMkdirOpen(true)}>
+            <FolderPlus size={17} color={theme.colors.secondary} />
+          </CircleButton>
+          <CircleButton label={uploading ? "Working…" : "Upload"} onPress={pickAndUpload}>
+            <Upload size={17} color={theme.colors.secondary} />
+          </CircleButton>
+        </View>
       </View>
+
+      <View style={styles.crumbRow}>
+        {canGoUp ? (
+          <Pressable
+            style={styles.backBtn}
+            onPress={() => browse(parentOf(path))}
+            accessibilityRole="button"
+            accessibilityLabel="Parent folder"
+            hitSlop={6}
+          >
+            <ArrowLeft size={18} color={theme.colors.foreground} />
+          </Pressable>
+        ) : null}
+        <Text style={styles.path} numberOfLines={1}>
+          {path || "…"}
+        </Text>
+      </View>
+
       {uploading ? <Text style={styles.progress}>{uploading}</Text> : null}
 
       {busy && entries.length === 0 ? (
@@ -315,59 +320,42 @@ export function FilesScreen({ client }: { client: RpcClient | null }) {
       ) : error ? (
         <View>
           <Text style={styles.error}>{error}</Text>
-          <ToolbarButton icon={<RefreshCw size={17} color={theme.colors.link} />} label="Retry" onPress={refresh} />
+          <Pressable style={styles.retryRow} onPress={refresh}>
+            <RefreshCw size={16} color={theme.colors.link} />
+            <Text style={styles.retryLabel}>Retry</Text>
+          </Pressable>
         </View>
       ) : (
-        <ScrollView contentContainerStyle={{ gap: 8, paddingBottom: 24 }}>
+        <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
           <Text style={styles.count}>
             {totalCount} item{totalCount === 1 ? "" : "s"}
             {includeHidden ? " · including hidden" : ""}
           </Text>
-          {path !== "/" && path !== "" ? (
-            <Pressable onPress={() => browse(parentOf(path))}>
-              <Card>
-                <View style={styles.row}>
-                  <View style={styles.iconWrap}>
-                    <CornerUpLeft size={19} color={theme.colors.secondary} />
-                  </View>
-                  <Text style={styles.rowLabel}>Parent folder</Text>
-                </View>
-              </Card>
-            </Pressable>
-          ) : null}
           {entries.map((e) => (
-            <Pressable key={e.fullPath} onPress={() => openEntry(e)} onLongPress={() => setActionTarget(e)}>
-              <Card>
-                <View style={styles.row}>
-                  <View style={styles.iconWrap}>
-                    <EntryIcon entry={e} />
-                  </View>
-                  <View style={styles.rowBody}>
-                    <Text style={styles.rowLabel} numberOfLines={1}>
-                      {e.name}
-                      {e.isSymlink ? " 🔗" : ""}
-                    </Text>
-                    <Text style={styles.rowMeta} numberOfLines={1}>
-                      {e.isDirectory ? "Folder" : `${kindLabel(fileKindFromName(e.name), false)} · ${formatBytes(e.size)}`} · {formatDateTime(e.mtimeMs)}
-                    </Text>
-                  </View>
-                  {!e.isDirectory && <Text style={styles.size}>{formatBytes(e.size)}</Text>}
-                  {e.isDirectory && <ChevronRight size={18} color={theme.colors.chevron} />}
-                </View>
-              </Card>
+            <Pressable key={e.fullPath} onPress={() => openEntry(e)} onLongPress={() => setActionTarget(e)} style={styles.fileRow}>
+              <View style={styles.iconWrap}>
+                <EntryIcon entry={e} />
+              </View>
+              <View style={styles.rowBody}>
+                <Text style={styles.rowLabel} numberOfLines={1}>
+                  {e.name}
+                  {e.isSymlink ? " 🔗" : ""}
+                </Text>
+                <Text style={styles.rowMeta} numberOfLines={1}>
+                  {e.isDirectory ? "Folder" : `${kindLabel(fileKindFromName(e.name), false)} · ${formatBytes(e.size)}`} · {formatDateTime(e.mtimeMs)}
+                </Text>
+              </View>
+              {e.isFile ? <Text style={styles.size}>{formatBytes(e.size)}</Text> : <ChevronRight size={18} color={theme.colors.chevron} />}
             </Pressable>
           ))}
           {hasMore ? (
-            <Pressable onPress={() => browse(path || "", { offset: entries.length, append: true })} disabled={loadingMore}>
-              <Card>
-                <Text style={styles.loadMore}>{loadingMore ? "Loading…" : `Load more (${entries.length}/${totalCount})`}</Text>
-              </Card>
+            <Pressable onPress={() => browse(path || "", { offset: entries.length, append: true })} disabled={loadingMore} style={styles.loadMoreRow}>
+              <Text style={styles.loadMore}>{loadingMore ? "Loading…" : `Load more (${entries.length}/${totalCount})`}</Text>
             </Pressable>
           ) : null}
           {entries.length === 0 ? <Text style={styles.empty}>Empty folder</Text> : null}
         </ScrollView>
       )}
-      <Text style={styles.hint}>Tap a folder to open, a file to preview. Long-press for actions.</Text>
 
       {/* action sheet */}
       <Modal visible={actionTarget !== null} transparent animationType="fade" onRequestClose={() => setActionTarget(null)}>
@@ -439,23 +427,6 @@ export function FilesScreen({ client }: { client: RpcClient | null }) {
         onSubmit={doRename}
       />
 
-      {/* new text file */}
-      <Modal visible={newTextOpen} animationType="slide" onRequestClose={() => setNewTextOpen(false)}>
-        <View style={styles.modalRoot}>
-          <Text style={styles.modalTitle}>New file in {path || "/"}</Text>
-          <TextInput style={styles.input} placeholder="filename.txt" placeholderTextColor={theme.colors.muted} value={newTextName} onChangeText={setNewTextName} autoCapitalize="none" autoCorrect={false} />
-          <TextInput style={[styles.input, styles.codeInput]} placeholder="Contents…" placeholderTextColor={theme.colors.muted} value={newTextContent} onChangeText={setNewTextContent} multiline autoCapitalize="none" autoCorrect={false} />
-          <View style={styles.modalButtons}>
-            <Pressable style={styles.cancelBtn} onPress={() => setNewTextOpen(false)}>
-              <Text style={styles.cancelLabel}>Cancel</Text>
-            </Pressable>
-            <Pressable style={[styles.submitBtn, mutating && styles.disabledBtn]} onPress={doCreateTextFile} disabled={mutating}>
-              <Text style={styles.submitLabel}>{mutating ? "Creating…" : "Create"}</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
-
       {/* delete confirm */}
       <Modal visible={deleteTarget !== null} transparent animationType="fade" onRequestClose={() => setDeleteTarget(null)}>
         <View style={styles.sheetBackdrop}>
@@ -517,8 +488,9 @@ function EntryIcon({ entry }: { entry: ExplorerEntry }) {
 /**
  * Type-routed preview. Ports t3code `FilePreviewPanel` branching:
  * media streams over HTTP (`/api/files/preview`, never inlined in RPC),
- * text-likes go through `filesystem.readFile` with a truncation banner,
- * everything else gets metadata + download/share (anyview adapters pending).
+ * text-likes go through `filesystem.readFile` with Shiki highlighting and
+ * a truncation banner, everything else gets metadata + download/share
+ * (anyview adapters pending).
  */
 function PreviewScreen({
   client,
@@ -542,12 +514,13 @@ function PreviewScreen({
   onRename: () => void;
 }) {
   const kind: FileKind = entry.isDirectory ? "binary" : fileKindFromName(entry.name);
+  const insets = useSafeAreaInsets();
   return (
-    <View style={styles.previewRoot}>
+    <View style={[styles.previewRoot, { paddingTop: insets.top + 8 }]}>
       <View style={styles.previewHeader}>
-        <Pressable onPress={onClose} style={styles.headerBtn}>
-          <X size={20} color={theme.colors.foreground} />
-        </Pressable>
+        <CircleButton label="Close preview" onPress={onClose}>
+          <X size={17} color={theme.colors.foreground} />
+        </CircleButton>
         <View style={styles.previewTitleWrap}>
           <Text style={styles.previewTitle} numberOfLines={1}>
             {entry.name}
@@ -556,9 +529,15 @@ function PreviewScreen({
             {entry.isDirectory ? "Folder" : `${kindLabel(kind, false)} · ${formatBytes(entry.size)}`}
           </Text>
         </View>
-        <Pressable onPress={onDownload} style={styles.headerBtn}>
-          <Download size={19} color={theme.colors.secondary} />
-        </Pressable>
+        <CircleButton label="Rename" onPress={onRename}>
+          <Pencil size={16} color={theme.colors.secondary} />
+        </CircleButton>
+        <CircleButton label="Download" onPress={onDownload}>
+          <Download size={16} color={theme.colors.secondary} />
+        </CircleButton>
+        <CircleButton label="Delete" onPress={onDelete}>
+          <Trash size={16} color={theme.colors.danger} />
+        </CircleButton>
       </View>
 
       {entry.isDirectory ? (
@@ -575,25 +554,28 @@ function PreviewScreen({
       ) : (
         <GenericFileView entry={entry} kind={kind} onDownload={onDownload} onOpenExternal={onOpenExternal} />
       )}
-
-      <View style={styles.previewFooter}>
-        <FooterButton label="Rename" icon={<Pencil size={15} color={theme.colors.secondary} />} onPress={onRename} />
-        <FooterButton label="Download" icon={<Download size={15} color={theme.colors.secondary} />} onPress={onDownload} />
-        <FooterButton label="Delete" danger icon={<Trash size={15} color={theme.colors.danger} />} onPress={onDelete} />
-      </View>
     </View>
   );
 }
 
 function TextPreviewView({ client, entry, kind }: { client: RpcClient; entry: ExplorerEntry; kind: FileKind }) {
   const [preview, setPreview] = useState<TextPreview | null>(null);
+  const [highlighted, setHighlighted] = useState<HighlightedLine[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
+    setPreview(null);
+    setHighlighted(null);
+    setError(null);
     (async () => {
       try {
         const res = (await client.call("filesystem.readFile", { path: entry.fullPath })) as TextPreview;
-        if (!cancelled) setPreview(res);
+        if (cancelled) return;
+        setPreview(res);
+        if (!res.isBinary) {
+          const h = await highlightCode(res.content, entry.name);
+          if (!cancelled) setHighlighted(h);
+        }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       }
@@ -601,7 +583,7 @@ function TextPreviewView({ client, entry, kind }: { client: RpcClient; entry: Ex
     return () => {
       cancelled = true;
     };
-  }, [client, entry.fullPath]);
+  }, [client, entry.fullPath, entry.name]);
 
   if (error) return <Text style={styles.error}>{error}</Text>;
   if (!preview) return <ActivityIndicator color={theme.colors.foreground} style={{ marginTop: 32 }} />;
@@ -612,52 +594,200 @@ function TextPreviewView({ client, entry, kind }: { client: RpcClient; entry: Ex
         <Text style={styles.centerText}>Binary file — no text preview. Use Download.</Text>
       </View>
     );
-  const lines = preview.content.split("\n");
-  const shown = lines.slice(0, MAX_RENDER_LINES);
+  const hlLines = highlighted?.slice(0, MAX_RENDER_LINES) ?? null;
+  const plainLines = hlLines ? null : preview.content.split("\n").slice(0, MAX_RENDER_LINES);
+  const totalLines = preview.content.split("\n").length;
   return (
     <ScrollView style={styles.codeScroll} contentContainerStyle={{ paddingBottom: 24 }}>
       {preview.truncated ? (
         <Text style={styles.truncatedBanner}>
-          Preview limited to the first {formatBytes(preview.byteLength)} of {formatBytes(preview.size)} (t3code shows the same 1 MiB cap). Download for the full file.
+          Preview limited to the first {formatBytes(preview.byteLength)} of {formatBytes(preview.size)}. Download for the full file.
         </Text>
       ) : null}
-      {kind === "markdown" ? <Text style={styles.kindNote}>Markdown source shown as plain text.</Text> : null}
-      {shown.map((line, i) => (
-        <View key={i} style={styles.codeLine}>
-          <Text style={styles.codeNum}>{i + 1}</Text>
-          <Text style={styles.codeText}>{line || " "}</Text>
-        </View>
-      ))}
-      {lines.length > MAX_RENDER_LINES ? (
-        <Text style={styles.truncatedBanner}>… {lines.length - MAX_RENDER_LINES} more lines not rendered.</Text>
+      {kind === "markdown" ? <Text style={styles.kindNote}>Markdown source shown with highlighting.</Text> : null}
+      {hlLines
+        ? hlLines.map((line, i) => (
+            <View key={i} style={styles.codeLine}>
+              <Text style={styles.codeNum}>{i + 1}</Text>
+              <Text style={styles.codeText}>
+                {line.length === 0 ? (
+                  " "
+                ) : (
+                  line.map((tok, j) => (
+                    <Text key={j} style={tok.color ? { color: tok.color } : undefined}>
+                      {tok.text}
+                    </Text>
+                  ))
+                )}
+              </Text>
+            </View>
+          ))
+        : (plainLines ?? []).map((line, i) => (
+            <View key={i} style={styles.codeLine}>
+              <Text style={styles.codeNum}>{i + 1}</Text>
+              <Text style={styles.codeText}>{line || " "}</Text>
+            </View>
+          ))}
+      {totalLines > MAX_RENDER_LINES ? (
+        <Text style={styles.truncatedBanner}>… {totalLines - MAX_RENDER_LINES} more lines not rendered.</Text>
       ) : null}
     </ScrollView>
+  );
+}
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, v));
+}
+
+/**
+ * Pinch-to-zoom + pan container (no native deps — ScrollView zoom only
+ * works on iOS). Two fingers scale 1–5x, one finger pans while zoomed,
+ * translation resets when pinching back to 1x.
+ */
+function Zoomable({ children }: { children: React.ReactNode }) {
+  const [t, setT] = useState({ scale: 1, tx: 0, ty: 0 });
+  const r = useRef({
+    scale: 1,
+    tx: 0,
+    ty: 0,
+    startDist: 0,
+    baseScale: 1,
+    lastX: 0,
+    lastY: 0,
+    mode: "none" as "none" | "pinch" | "pan",
+  });
+  const commit = useCallback(() => {
+    setT({ scale: r.current.scale, tx: r.current.tx, ty: r.current.ty });
+  }, []);
+
+  const responder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (e) => {
+        const touches = e.nativeEvent.touches;
+        if (touches.length >= 2 && touches[0] && touches[1]) {
+          r.current.mode = "pinch";
+          r.current.startDist = Math.hypot(
+            touches[0].pageX - touches[1].pageX,
+            touches[0].pageY - touches[1].pageY,
+          );
+          r.current.baseScale = r.current.scale;
+        } else if (touches.length === 1 && touches[0] && r.current.scale > 1) {
+          r.current.mode = "pan";
+          r.current.lastX = touches[0].pageX;
+          r.current.lastY = touches[0].pageY;
+        } else {
+          r.current.mode = "none";
+        }
+      },
+      onPanResponderMove: (e) => {
+        const touches = e.nativeEvent.touches;
+        if (touches.length >= 2 && touches[0] && touches[1]) {
+          // second finger landed mid-gesture — (re)start the pinch
+          if (r.current.mode !== "pinch") {
+            r.current.mode = "pinch";
+            r.current.startDist = Math.hypot(
+              touches[0].pageX - touches[1].pageX,
+              touches[0].pageY - touches[1].pageY,
+            );
+            r.current.baseScale = r.current.scale;
+            return;
+          }
+          if (r.current.startDist > 0) {
+            r.current.scale = clamp(r.current.baseScale * (Math.hypot(
+              touches[0].pageX - touches[1].pageX,
+              touches[0].pageY - touches[1].pageY,
+            ) / r.current.startDist), 1, 5);
+            if (r.current.scale <= 1) {
+              r.current.tx = 0;
+              r.current.ty = 0;
+            }
+            commit();
+          }
+        } else if (r.current.mode === "pinch" && touches.length === 1 && touches[0] && r.current.scale > 1) {
+          // lifted one finger mid-pinch — keep panning
+          r.current.mode = "pan";
+          r.current.lastX = touches[0].pageX;
+          r.current.lastY = touches[0].pageY;
+        } else if (r.current.mode === "pan" && touches.length === 1 && touches[0]) {
+          const dx = touches[0].pageX - r.current.lastX;
+          const dy = touches[0].pageY - r.current.lastY;
+          r.current.lastX = touches[0].pageX;
+          r.current.lastY = touches[0].pageY;
+          const lim = 320 * r.current.scale;
+          r.current.tx = clamp(r.current.tx + dx, -lim, lim);
+          r.current.ty = clamp(r.current.ty + dy, -lim, lim);
+          commit();
+        }
+      },
+      onPanResponderRelease: () => {
+        r.current.mode = "none";
+      },
+      onPanResponderTerminate: () => {
+        r.current.mode = "none";
+      },
+    }),
+  ).current;
+
+  return (
+    <View style={styles.zoomArea} {...responder.panHandlers}>
+      <View
+        style={[
+          styles.zoomContent,
+          { transform: [{ scale: t.scale }, { translateX: t.tx }, { translateY: t.ty }] },
+        ]}
+      >
+        {children}
+      </View>
+    </View>
   );
 }
 
 function ImagePreviewView({ baseUrl, token, entry }: { baseUrl: string; token: string; entry: ExplorerEntry }) {
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
+  const uri = previewUrl(baseUrl, token, entry.fullPath);
+  const isSvg = entry.extension.toLowerCase() === ".svg";
+  const onFail = useCallback(() => {
+    setLoading(false);
+    setFailed(true);
+  }, []);
   return (
     <View style={styles.mediaBox}>
-      {loading && !failed ? <ActivityIndicator color={theme.colors.foreground} /> : null}
+      {loading && !failed ? (
+        <View style={styles.mediaLoader}>
+          <ActivityIndicator color={theme.colors.foreground} />
+        </View>
+      ) : null}
       {failed ? (
         <Text style={styles.error}>Could not load image.</Text>
       ) : (
-        <Image
-          source={{ uri: previewUrl(baseUrl, token, entry.fullPath) }}
-          style={styles.image}
-          resizeMode="contain"
-          onLoadStart={() => {
-            setLoading(true);
-            setFailed(false);
-          }}
-          onLoadEnd={() => setLoading(false)}
-          onError={() => {
-            setLoading(false);
-            setFailed(true);
-          }}
-        />
+        <Zoomable>
+          {isSvg ? (
+            // RN Image can't decode SVG — react-native-svg renders it
+            // (already a dependency). Auth rides the ?token= query.
+            <SvgUri
+              uri={uri}
+              width="100%"
+              height="100%"
+              onLoad={() => setLoading(false)}
+              onError={onFail}
+            />
+          ) : (
+            <Image
+              source={{ uri }}
+              style={styles.image}
+              resizeMode="contain"
+              onLoadStart={() => {
+                setLoading(true);
+                setFailed(false);
+              }}
+              onLoadEnd={() => setLoading(false)}
+              onError={onFail}
+            />
+          )}
+        </Zoomable>
       )}
     </View>
   );
@@ -802,11 +932,17 @@ function DetailRow({ k, v }: { k: string; v: string }) {
 
 // -- small building blocks -----------------------------------------------------
 
-function ToolbarButton({ icon, label, onPress }: { icon: React.ReactNode; label: string; onPress: () => void }) {
+/** Circular icon button in the t3Code top-bar style (dark disc, no label). */
+function CircleButton({ label, onPress, children }: { label: string; onPress: () => void; children: React.ReactNode }) {
   return (
-    <Pressable style={styles.toolBtn} onPress={onPress}>
-      {icon}
-      <Text style={styles.toolLabel}>{label}</Text>
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      hitSlop={4}
+      style={styles.circleBtn}
+    >
+      {children}
     </Pressable>
   );
 }
@@ -816,15 +952,6 @@ function SheetRow({ label, icon, onPress, danger }: { label: string; icon: React
     <Pressable style={styles.sheetRow} onPress={onPress}>
       {icon}
       <Text style={[styles.sheetLabel, danger && styles.dangerLabel]}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function FooterButton({ label, icon, onPress, danger }: { label: string; icon: React.ReactNode; onPress: () => void; danger?: boolean }) {
-  return (
-    <Pressable style={styles.footerBtn} onPress={onPress}>
-      {icon}
-      <Text style={[styles.footerLabel, danger && styles.dangerLabel]}>{label}</Text>
     </Pressable>
   );
 }
@@ -887,23 +1014,51 @@ export function Placeholder({ label }: { label: string }) {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.colors.screen, padding: 16 },
-  title: { color: theme.colors.foreground, fontSize: 26, fontFamily: theme.font.bold },
-  path: { color: theme.colors.secondary, fontSize: 13, fontFamily: theme.font.regular, marginVertical: 8 },
-  toolbar: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 8 },
-  toolBtn: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: theme.colors.card, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 8, borderWidth: 1, borderColor: theme.colors.border },
-  toolLabel: { color: theme.colors.secondary, fontSize: 12, fontFamily: theme.font.regular },
+  title: { color: theme.colors.foreground, fontSize: 26, fontFamily: theme.font.bold, flex: 1 },
+  headerRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 10 },
+  circleBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: theme.colors.card,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  crumbRow: { flexDirection: "row", alignItems: "center", gap: 10, marginVertical: 12 },
+  backBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  path: { color: theme.colors.secondary, fontSize: 14, fontFamily: theme.font.regular, flex: 1 },
   progress: { color: theme.colors.link, fontSize: 12, fontFamily: theme.font.regular, marginBottom: 8 },
   count: { color: theme.colors.muted, fontSize: 12, fontFamily: theme.font.regular, marginBottom: 4 },
-  row: { flexDirection: "row", alignItems: "center" },
-  iconWrap: { marginRight: 10, justifyContent: "center" },
+  fileRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 10,
+    paddingHorizontal: 2,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: theme.colors.border,
+  },
+  iconWrap: { marginRight: 12, justifyContent: "center", width: 22, alignItems: "center" },
   rowBody: { flex: 1 },
   rowLabel: { color: theme.colors.foreground, fontSize: 15, fontFamily: theme.font.regular },
   rowMeta: { color: theme.colors.muted, fontSize: 12, fontFamily: theme.font.regular, marginTop: 2 },
   size: { color: theme.colors.secondary, fontSize: 13, fontFamily: theme.font.regular, marginLeft: 8 },
-  loadMore: { color: theme.colors.link, fontSize: 14, fontFamily: theme.font.medium, textAlign: "center" },
+  loadMoreRow: { paddingVertical: 14, alignItems: "center" },
+  loadMore: { color: theme.colors.link, fontSize: 14, fontFamily: theme.font.medium },
+  retryRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12 },
+  retryLabel: { color: theme.colors.link, fontSize: 14, fontFamily: theme.font.medium },
   error: { color: theme.colors.danger, fontFamily: theme.font.regular, marginTop: 16 },
   empty: { color: theme.colors.muted, fontFamily: theme.font.regular, fontSize: 14, textAlign: "center", marginTop: 48 },
-  hint: { color: theme.colors.tertiary, fontSize: 11, fontFamily: theme.font.regular, textAlign: "center", paddingVertical: 8 },
   // sheets & modals
   sheetBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" },
   sheet: { backgroundColor: theme.colors.cardAlt, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 16, gap: 4, borderWidth: 1, borderColor: theme.colors.border },
@@ -914,10 +1069,7 @@ const styles = StyleSheet.create({
   deleteWarn: { color: theme.colors.secondary, fontSize: 13, fontFamily: theme.font.regular, marginBottom: 12 },
   deleteBtn: { backgroundColor: theme.colors.danger, borderRadius: 12, paddingHorizontal: 18, paddingVertical: 10 },
   deleteLabel: { color: "#fff", fontSize: 14, fontFamily: theme.font.medium },
-  modalRoot: { flex: 1, backgroundColor: theme.colors.screen, padding: 16, paddingTop: 64 },
-  modalTitle: { color: theme.colors.foreground, fontSize: 18, fontFamily: theme.font.bold, marginBottom: 12 },
   input: { backgroundColor: theme.colors.card, color: theme.colors.foreground, borderRadius: 12, borderWidth: 1, borderColor: theme.colors.border, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, fontFamily: theme.font.regular, marginBottom: 12 },
-  codeInput: { minHeight: 200, textAlignVertical: "top", fontSize: 13 },
   modalButtons: { flexDirection: "row", justifyContent: "flex-end", gap: 10, marginTop: 4 },
   cancelBtn: { borderRadius: 12, paddingHorizontal: 18, paddingVertical: 10, borderWidth: 1, borderColor: theme.colors.border },
   cancelLabel: { color: theme.colors.secondary, fontSize: 14, fontFamily: theme.font.medium },
@@ -928,15 +1080,11 @@ const styles = StyleSheet.create({
   detailKey: { color: theme.colors.muted, fontSize: 13, fontFamily: theme.font.regular, width: 80 },
   detailVal: { color: theme.colors.foreground, fontSize: 13, fontFamily: theme.font.regular, flex: 1 },
   // preview
-  previewRoot: { flex: 1, backgroundColor: theme.colors.screen, paddingTop: 48 },
+  previewRoot: { flex: 1, backgroundColor: theme.colors.screen },
   previewHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingBottom: 8, gap: 8 },
-  headerBtn: { padding: 8 },
-  previewTitleWrap: { flex: 1 },
+  previewTitleWrap: { flex: 1, marginHorizontal: 4 },
   previewTitle: { color: theme.colors.foreground, fontSize: 16, fontFamily: theme.font.bold },
   previewSubtitle: { color: theme.colors.muted, fontSize: 12, fontFamily: theme.font.regular },
-  previewFooter: { flexDirection: "row", justifyContent: "space-around", paddingVertical: 12, borderTopWidth: 1, borderTopColor: theme.colors.border },
-  footerBtn: { flexDirection: "row", alignItems: "center", gap: 6, padding: 8 },
-  footerLabel: { color: theme.colors.secondary, fontSize: 13, fontFamily: theme.font.medium },
   centerBox: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 24 },
   centerTitle: { color: theme.colors.foreground, fontSize: 15, fontFamily: theme.font.medium, textAlign: "center" },
   centerText: { color: theme.colors.secondary, fontSize: 13, fontFamily: theme.font.regular, textAlign: "center" },
@@ -948,6 +1096,9 @@ const styles = StyleSheet.create({
   truncatedBanner: { color: theme.colors.muted, fontSize: 12, fontFamily: theme.font.regular, backgroundColor: theme.colors.card, borderRadius: 8, padding: 8, marginVertical: 8 },
   kindNote: { color: theme.colors.muted, fontSize: 12, fontFamily: theme.font.regular, marginBottom: 8 },
   mediaBox: { flex: 1, alignItems: "center", justifyContent: "center", padding: 16, gap: 12 },
+  mediaLoader: { position: "absolute", top: 0, bottom: 0, left: 0, right: 0, alignItems: "center", justifyContent: "center" },
+  zoomArea: { width: "100%", height: "100%" },
+  zoomContent: { width: "100%", height: "100%", alignItems: "center", justifyContent: "center" },
   image: { width: "100%", height: "100%" },
   videoPlayer: { width: "100%", height: 320, backgroundColor: "#000", borderRadius: 12 },
   audioPlayer: { width: "100%", height: 120, backgroundColor: "#000", borderRadius: 12 },

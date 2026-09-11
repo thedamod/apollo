@@ -1,27 +1,32 @@
 import React, { useEffect, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { Play, Plus } from "lucide-react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Plus } from "lucide-react-native";
 import { theme } from "../theme";
 import type { RpcClient } from "../lib/client";
 import { Card } from "../components/Card";
 import { ScriptCreateSheet } from "../features/scripts/ScriptCreateSheet";
+import { ScriptRunSheet, type RunnableScript } from "../features/scripts/ScriptRunSheet";
+import type { ScriptParam } from "../features/scripts/params";
 import { Placeholder } from "./Files";
 
 interface ScriptDef {
   id: string;
   name: string;
   command: string;
+  description?: string;
+  icon?: string;
   cwd?: string;
   runMode?: string;
+  params?: ScriptParam[];
 }
 
 /** Short-lived scripts over `scripts.*` RPC. */
 export function ScriptsScreen({ client }: { client: RpcClient | null }) {
   const [scripts, setScripts] = useState<ScriptDef[]>([]);
   const [busy, setBusy] = useState(false);
-  const [output, setOutput] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [running, setRunning] = useState<RunnableScript | null>(null);
 
   function reload() {
     if (!client) return;
@@ -41,33 +46,17 @@ export function ScriptsScreen({ client }: { client: RpcClient | null }) {
       .finally(() => setBusy(false));
     const off = client.onEvent((channel, payload) => {
       if (channel === "scripts") {
-        const p = payload as { type?: string; content?: string; chunk?: string };
-        if (typeof p.content === "string") setOutput((o) => (o + p.content).slice(-4000));
-        else if (typeof p.chunk === "string") setOutput((o) => (o + p.chunk).slice(-4000));
+        const p = payload as { type?: string };
+        // list refreshes on finish so cards stay fresh; live output lives in the run sheet
+        if (p.type === "finished") reload();
       }
     });
     client.subscribe("scripts.subscribe", {});
     return off;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
 
   if (!client) return <Placeholder label="Connect to run scripts" />;
-
-  async function run(id: string) {
-    if (!client) return;
-    setOutput("");
-    setError(null);
-    try {
-      const r = (await client.call("scripts.run", { id })) as { runId?: string };
-      if (r?.runId) {
-        const logs = (await client.call("scripts.logs", { runId: r.runId })) as { content?: string };
-        if (logs?.content) setOutput(logs.content.slice(-4000));
-      }
-      const list = (await client.call("scripts.list", {})) as ScriptDef[];
-      if (Array.isArray(list)) setScripts(list);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }
 
   return (
     <View style={styles.root}>
@@ -81,31 +70,27 @@ export function ScriptsScreen({ client }: { client: RpcClient | null }) {
       {error ? <Text style={styles.error}>{error}</Text> : null}
       <ScrollView contentContainerStyle={{ gap: 8, paddingVertical: 12 }}>
         {scripts.map((s) => (
-          <Card key={s.id}>
+          <Card key={s.id} onPress={() => setRunning({ id: s.id, name: s.name, description: s.description, icon: s.icon, command: s.command, params: s.params })}>
             <View style={styles.row}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.name}>{s.name}</Text>
-                <Text style={styles.cmd} numberOfLines={2}>
-                  {s.command}
+                <Text style={styles.name}>
+                  {s.icon ? `${s.icon} ` : ""}{s.name}
                 </Text>
+                <Text style={styles.cmd} numberOfLines={2}>
+                  {s.description || s.command}
+                </Text>
+                {(s.params?.length ?? 0) > 0 ? (
+                  <Text style={styles.inputs}>{s.params!.length} input{s.params!.length === 1 ? "" : "s"}</Text>
+                ) : null}
               </View>
-              {s.runMode !== "scheduled" ? (
-                <Pressable style={styles.run} onPress={() => run(s.id)}>
-                  <Play size={13} color={theme.colors.foreground} />
-                  <Text style={styles.runLabel}>Run</Text>
-                </Pressable>
-              ) : null}
+              <Text style={styles.chev}>›</Text>
             </View>
           </Card>
         ))}
         {scripts.length === 0 && !busy ? <Text style={styles.empty}>No scripts yet — tap + to create one.</Text> : null}
-        {output ? (
-          <Card>
-            <TextInput value={output} multiline editable={false} style={styles.log} />
-          </Card>
-        ) : null}
       </ScrollView>
       <ScriptCreateSheet visible={creating} client={client} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); reload(); }} />
+      <ScriptRunSheet script={running} client={client} onClose={() => { setRunning(null); reload(); }} />
     </View>
   );
 }
@@ -118,9 +103,8 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: 12 },
   name: { color: theme.colors.foreground, fontSize: 16, fontFamily: theme.font.bold },
   cmd: { color: theme.colors.secondary, fontSize: 13, fontFamily: theme.font.regular, marginTop: 4 },
-  run: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: theme.colors.cardAlt, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8 },
-  runLabel: { color: theme.colors.foreground, fontFamily: theme.font.medium, fontSize: 13 },
-  log: { color: theme.colors.foreground, fontFamily: theme.font.regular, fontSize: 12, minHeight: 120 },
+  inputs: { color: theme.colors.muted, fontSize: 12, fontFamily: theme.font.medium, marginTop: 4 },
+  chev: { color: theme.colors.chevron, fontSize: 22, fontFamily: theme.font.regular },
   error: { color: theme.colors.danger, fontFamily: theme.font.regular, marginTop: 8 },
   empty: { color: theme.colors.muted, fontFamily: theme.font.regular, marginTop: 16 },
 });

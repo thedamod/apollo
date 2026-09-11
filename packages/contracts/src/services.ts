@@ -14,9 +14,23 @@ export const ServiceStatus = z.enum([
   "starting",
   "stopping",
   "error",
+  "failed",
   "unknown",
 ]);
 export type ServiceStatus = z.infer<typeof ServiceStatus>;
+
+/**
+ * UI-facing status: Running / Stopped / Failed.
+ * `error` is a legacy alias of `failed` (kept for wire compat).
+ */
+export const ServiceDisplayStatus = z.enum(["running", "stopped", "failed"]);
+export type ServiceDisplayStatus = z.infer<typeof ServiceDisplayStatus>;
+
+export function toDisplayStatus(s: ServiceStatus): ServiceDisplayStatus {
+  if (s === "running" || s === "starting") return "running";
+  if (s === "error" || s === "failed") return "failed";
+  return "stopped";
+}
 
 export const HealthCheckConfig = z.object({
   type: z.enum(["process", "port", "http"]).default("process"),
@@ -70,6 +84,17 @@ export const ServiceInstance = ServiceDefinition.extend({
     })
     .nullable(),
   logsPath: z.string().nullable(),
+  // --- detail-page fields (populated on get/status, best-effort) ---
+  /** http(s) URL derived from `port` when known, e.g. http://<host>:8096 */
+  url: z.string().nullable().optional(),
+  /** systemd `is-enabled` state; null when not a systemd unit or unknown */
+  systemdEnabled: z.boolean().nullable().optional(),
+  /** raw ActiveState/SubState from systemctl, e.g. active/running */
+  systemdActiveState: z.string().nullable().optional(),
+  systemdSubState: z.string().nullable().optional(),
+  /** best-effort CPU % and RSS bytes for the main PID */
+  cpuPercent: z.number().nullable().optional(),
+  memoryBytes: z.number().nullable().optional(),
 });
 export type ServiceInstance = z.infer<typeof ServiceInstance>;
 

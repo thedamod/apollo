@@ -6,6 +6,8 @@ import {
   ScriptRunInput,
   ScriptStopInput,
   ScriptLogsInput,
+  ScriptRunsInput,
+  ScriptGetRunInput,
 } from "@home-server/contracts";
 import { z } from "zod";
 import type { RpcRegistry } from "../registry.ts";
@@ -25,5 +27,11 @@ export function registerScriptHandlers(reg: RpcRegistry, svc: ScriptService): vo
   reg.registerZod(RpcMethod.scriptsLogs, ScriptLogsInput, async (p) => {
     const content = await svc.readLogs(p.runId, p.tailLines);
     return { runId: p.runId, content };
+  });
+  reg.registerZod(RpcMethod.scriptsRuns, ScriptRunsInput, async (p) => svc.listRunsFiltered(p ?? {}));
+  reg.registerZod(RpcMethod.scriptsGetRun, ScriptGetRunInput, async (p) => {
+    const r = svc.getRun(p.runId);
+    if (!r) throw Object.assign(new Error(`Unknown run: ${p.runId}`), { code: "not_found" });
+    return r;
   });
 }

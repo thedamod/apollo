@@ -159,3 +159,38 @@ export type ServiceLogsInput = z.infer<typeof ServiceLogsInput>;
 
 export const ServiceStatusInput = z.object({ id: z.string().min(1) });
 export type ServiceStatusInput = z.infer<typeof ServiceStatusInput>;
+
+// --- systemd discovery: hide system units by default, focus on user-facing ---
+
+export const SystemdUnitSummary = z.object({
+  unit: z.string(),
+  description: z.string().optional().default(""),
+  loadState: z.string().optional().default(""),
+  activeState: z.string().optional().default(""),
+  subState: z.string().optional().default(""),
+  /** `systemctl is-enabled` result */
+  enabled: z.boolean().nullable(),
+  /** heuristic: user-facing (jellyfin, docker, samba, …) vs system plumbing */
+  userFacing: z.boolean(),
+  /** matches a managed service id, if any */
+  managedId: z.string().nullable().optional(),
+});
+export type SystemdUnitSummary = z.infer<typeof SystemdUnitSummary>;
+
+export const ServiceDiscoverInput = z
+  .object({
+    /** default true: hide system plumbing, show jellyfin/docker/samba-class units */
+    userFacingOnly: z.boolean().optional().default(true),
+    /** optional substring filter on unit name / description */
+    query: z.string().max(128).optional(),
+    limit: z.number().int().min(1).max(500).optional().default(100),
+  })
+  .optional();
+export type ServiceDiscoverInput = z.infer<typeof ServiceDiscoverInput>;
+
+export const ServiceSetEnabledInput = z.object({
+  id: z.string().min(1),
+  /** true = start on boot (`systemctl enable` for systemd, `enabled` flag otherwise) */
+  enabled: z.boolean(),
+});
+export type ServiceSetEnabledInput = z.infer<typeof ServiceSetEnabledInput>;

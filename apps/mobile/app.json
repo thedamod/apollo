@@ -21,7 +21,8 @@
     },
     "android": {
       "package": "gg.home.aether",
-      "usesCleartextTraffic": true
+      "usesCleartextTraffic": true,
+      "windowSoftInputMode": "adjustResize"
     },
     "plugins": [
       "expo-secure-store",

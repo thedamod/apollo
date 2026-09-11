@@ -11,7 +11,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Keyboard,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -88,7 +87,7 @@ function applyCtrlModifier(input: string): string {
   return input;
 }
 
-export function TerminalScreen({ client, serverLabel }: { client: RpcClient | null; serverLabel: string }) {
+export function TerminalScreen({ client, serverLabel, keyboardLift = 0 }: { client: RpcClient | null; serverLabel: string; keyboardLift?: number }) {
   const {
     isReady: hasResolvedFontPreference,
     appearance,
@@ -104,7 +103,6 @@ export function TerminalScreen({ client, serverLabel }: { client: RpcClient | nu
   const [textSizeOpen, setTextSizeOpen] = useState(false);
   const [pendingModifier, setPendingModifier] = useState<PendingModifier | null>(null);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [inputFocused, setInputFocused] = useState(false);
   const [renderVersion, setRenderVersion] = useState(0);
   const [field, setField] = useState(FIELD_SENTINEL);
@@ -142,12 +140,11 @@ export function TerminalScreen({ client, serverLabel }: { client: RpcClient | nu
   }, [terminalId]);
 
   // Keyboard visibility drives the accessory row vs the floating button.
-  // Belt and suspenders: will+did events (some IMEs only send one pair) plus
-  // the input's own focus state, so the controls can never vanish entirely.
+  // T3Code equivalent: useKeyboardState().isVisible. The bottom offset itself
+  // arrives via the keyboardLift prop (measured in App.tsx).
   useEffect(() => {
-    const onShow = (e: { endCoordinates: { height: number } }) => {
+    const onShow = () => {
       setKeyboardVisible(true);
-      setKeyboardHeight(e.endCoordinates.height);
     };
     const onHide = () => {
       setKeyboardVisible(false);
@@ -355,11 +352,33 @@ export function TerminalScreen({ client, serverLabel }: { client: RpcClient | nu
     [pendingModifier, writeInput],
   );
 
-  /** Soft-keyboard typing arrives through the hidden field. */
+  /** Soft-keyboard typing arrives through the hidden field.
+   *
+   * Controlled-input pitfall that caused double-typing (`c` → `cc`):
+   * `setField(SENTINEL)` after handling is a no-op when state already equals
+   * the sentinel, so the native text keeps the typed char (`" c"`). The next
+   * reconciliation then re-fires onChangeText with stale content and the char
+   * is sent twice. Fix: force the native text back via setNativeProps and
+   * swallow the echo event, so each keystroke is consumed exactly once.
+   */
+  const resettingRef = useRef(false);
   const handleFieldChange = useCallback(
     (next: string) => {
+      // Echo of our own programmatic reset — not a keystroke.
+      if (resettingRef.current) {
+        if (next === FIELD_SENTINEL) resettingRef.current = false;
+        return;
+      }
+      const consume = () => {
+        resettingRef.current = true;
+        inputRef.current?.setNativeProps({ text: FIELD_SENTINEL });
+        // State usually already equals the sentinel (no-op render); setting
+        // it keeps the controlled value in sync when it diverged (e.g. the
+        // `else handleInput(next)` cursor-midpoint path or backspace "").
+        setField(FIELD_SENTINEL);
+      };
       if (!isRunning) {
-        if (next !== FIELD_SENTINEL) setField(FIELD_SENTINEL);
+        if (next !== FIELD_SENTINEL) consume();
         return;
       }
       if (next.startsWith(FIELD_SENTINEL)) {
@@ -374,7 +393,7 @@ export function TerminalScreen({ client, serverLabel }: { client: RpcClient | nu
       } else {
         handleInput(next);
       }
-      if (next !== FIELD_SENTINEL) setField(FIELD_SENTINEL);
+      if (next !== FIELD_SENTINEL) consume();
     },
     [handleInput, isRunning],
   );
@@ -615,26 +634,33 @@ export function TerminalScreen({ client, serverLabel }: { client: RpcClient | nu
         </ScrollView>
       </Pressable>
 
-      {/* Hidden field carries soft-keyboard input straight to the PTY. */}
+      {/* Hidden field carries soft-keyboard input straight to the PTY.
+          Uncontrolled reset via setNativeProps (see handleFieldChange) keeps
+          Gboard suggestions/autofill from re-committing the same char. */}
       <TextInput
         ref={inputRef}
         value={field}
         onChangeText={handleFieldChange}
         onKeyPress={handleKeyPress}
         onSubmitEditing={() => handleInput("\r")}
+        onFocus={() => setInputFocused(true)}
+        onBlur={() => setInputFocused(false)}
         autoCapitalize="none"
         autoCorrect={false}
+        spellCheck={false}
+        autoComplete="off"
+        importantForAutofill="no"
         blurOnSubmit={false}
         returnKeyType="send"
         style={styles.hiddenInput}
       />
 
-      {keyboardVisible ? (
-        // iOS overlays the keyboard, so the accessory needs bottom padding
-        // to sit flush above it. Android already accounts for the keyboard
-        // (resize/pan) — a marginBottom here inflates layout and the OS
-        // overshoots, floating the buttons way above the keyboard.
-        <View style={[styles.accessory, Platform.OS === "ios" ? { paddingBottom: keyboardHeight } : null]}>
+      {controlsOpen ? (
+        // Bottom offset comes from the shell (keyboard height minus whatever
+        // the OS already shrank): full lift in pan mode (Expo Go), ~0 in
+        // resize mode (dev build). Either way flush, like T3Code's
+        // KeyboardStickyView with offset 0.
+        <View style={[styles.accessory, keyboardLift > 0 ? { marginBottom: keyboardLift } : null]}>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}

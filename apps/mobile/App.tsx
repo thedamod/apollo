@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, StatusBar, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Keyboard, StatusBar, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import * as Font from "expo-font";
 import { DMSans_400Regular, DMSans_500Medium, DMSans_700Bold } from "@expo-google-fonts/dm-sans";
@@ -54,6 +54,7 @@ function AppInner() {
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [tab, setTab] = useState<TabKey>("home");
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute>("main");
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [home, setHome] = useState<HomeData>(DEMO_HOME);
   const [live, setLive] = useState(false);
   const [tunnel, setTunnel] = useState<{ provider?: string; status?: string; publicUrl?: string | null } | null>(null);
@@ -73,6 +74,62 @@ function AppInner() {
   useEffect(() => () => {
     if (retryTimer.current) clearTimeout(retryTimer.current);
   }, []);
+
+  // T3Code equivalent of useKeyboardState() + KeyboardStickyView offset 0.
+  // The accessory must sit flush above the keyboard in EITHER window mode:
+  // adjustPan (Expo Go — layout keeps full height, keyboard overlays, so we
+  // must lift by the full keyboard height) or adjustResize (dev build — the
+  // OS already shrinks the layout, so lifting again would double-count and
+  // float the row). lift = keyboard height minus the OS shrink, measured at
+  // the outer window level so tab-bar visibility never pollutes it. The tab
+  // bar hides while typing so no dock height sits between row and keyboard.
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [windowShrink, setWindowShrink] = useState(0);
+  const keyboardOpenRef = useRef(false);
+  const windowBaseRef = useRef(0);
+  useEffect(() => {
+    const onShow = (e: { endCoordinates?: { height?: number } }) => {
+      keyboardOpenRef.current = true;
+      setKeyboardOpen(true);
+      setKeyboardHeight(e?.endCoordinates?.height ?? 0);
+    };
+    const onHide = () => {
+      keyboardOpenRef.current = false;
+      setKeyboardOpen(false);
+      setWindowShrink(0);
+    };
+    const showWill = Keyboard.addListener("keyboardWillShow", onShow);
+    const showDid = Keyboard.addListener("keyboardDidShow", onShow);
+    const hideWill = Keyboard.addListener("keyboardWillHide", onHide);
+    const hideDid = Keyboard.addListener("keyboardDidHide", onHide);
+    return () => {
+      showWill.remove();
+      showDid.remove();
+      hideWill.remove();
+      hideDid.remove();
+    };
+  }, []);
+
+  // Outer-window height: unaffected by tab-bar visibility or safe-area inner
+  // padding, so base-minus-current isolates exactly the OS resize shrink.
+  const handleWindowLayout = useCallback((e: LayoutChangeEvent) => {
+    const h = e.nativeEvent.layout.height;
+    if (!keyboardOpenRef.current) {
+      windowBaseRef.current = h;
+      setWindowShrink(0);
+      return;
+    }
+    setWindowShrink(Math.max(0, windowBaseRef.current - h));
+  }, []);
+
+  // Pan (Expo Go): shrink 0 → full-height lift. Resize (dev build): the OS
+  // already made room → lift collapses toward 0. Either way the row lands
+  // flush, matching T3Code's KeyboardStickyView offset 0.
+  const keyboardLift = keyboardOpen ? Math.max(0, keyboardHeight - windowShrink) : 0;
+  // While the keyboard covers the gesture bar the bottom inset would add a
+  // dead strip under the row — drop it on the terminal route only.
+  const safeEdges: Array<"top" | "right" | "bottom" | "left"> =
+    tab === "terminal" && keyboardOpen ? ["top", "right", "left"] : ["top", "right", "bottom", "left"];
 
   const persistCatalog = useCallback(async (c: ServerCatalog) => {
     setCatalog(c);
@@ -316,7 +373,7 @@ function AppInner() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top", "right", "bottom", "left"]}>
+    <SafeAreaView style={styles.safe} edges={safeEdges} onLayout={handleWindowLayout}>
       <StatusBar barStyle="light-content" />
       <View style={styles.body}>
         {reconnecting ? (
@@ -335,7 +392,7 @@ function AppInner() {
         ) : tab === "files" ? (
           <FilesScreen client={client} />
         ) : tab === "terminal" ? (
-          <TerminalScreen client={client} serverLabel={active.label} />
+          <TerminalScreen client={client} serverLabel={active.label} keyboardLift={keyboardLift} />
         ) : tab === "scripts" ? (
           <ScriptsScreen client={client} />
         ) : tab === "services" ? (
@@ -344,7 +401,9 @@ function AppInner() {
           renderSettings()
         )}
       </View>
-      <TabBar active={tab} onChange={(t) => { if (t !== "settings") setSettingsRoute("main"); setTab(t); }} />
+      {keyboardOpen ? null : (
+        <TabBar active={tab} onChange={(t) => { if (t !== "settings") setSettingsRoute("main"); setTab(t); }} />
+      )}
     </SafeAreaView>
   );
 }

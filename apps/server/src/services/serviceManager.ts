@@ -62,17 +62,173 @@ export class ServiceInvalidIdError extends Schema.TaggedError<ServiceInvalidIdEr
   }
 }
 
-export type ServiceError = ServiceNotFoundError | ServiceAlreadyExistsError | ServiceDriverError | ServiceInvalidIdError;
+export class ServiceSystemError extends Schema.TaggedError<ServiceSystemError>()(
+  "ServiceSystemError",
+  {
+    id: Schema.optional(Schema.String),
+    op: Schema.String,
+    cause: Schema.optional(Schema.Defect),
+  },
+) {
+  get message() {
+    return `Service operation ${this.op} failed${this.id ? ` for ${this.id}` : ""}`;
+  }
+}
+
+export type ServiceError =
+  | ServiceNotFoundError
+  | ServiceAlreadyExistsError
+  | ServiceDriverError
+  | ServiceInvalidIdError
+  | ServiceSystemError;
+
+/**
+ * Error surfaced to RPC callers. Real subclass (not `Object.assign`) so
+ * `code` survives Effect FiberFailure wrappers — same pattern as
+ * `FilesystemRpcError` in `services/filesystem.ts`.
+ */
+export class ServiceRpcError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ServiceRpcError";
+    this.code = code;
+  }
+}
+
+function serviceFailCode(e: ServiceError): string {
+  switch (e._tag) {
+    case "ServiceNotFoundError":
+      return "not_found";
+    case "ServiceAlreadyExistsError":
+      return "already_exists";
+    case "ServiceInvalidIdError":
+      return "invalid_id";
+    default:
+      return "unknown";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// User-facing systemd filtering + detail helpers
+// ---------------------------------------------------------------------------
+
+/** Injectable exec for testability (defaults to execFile). */
+export type ExecFn = (
+  cmd: string,
+  args: ReadonlyArray<string>,
+) => Promise<{ stdout: string; stderr: string }>;
+
+/** Substrings that mark a unit as user-facing (jellyfin/docker/samba-class). */
+export const USER_FACING_PATTERNS = [
+  "jellyfin",
+  "plex",
+  "emby",
+  "sonarr",
+  "radarr",
+  "navidrome",
+  "immich",
+  "nextcloud",
+  "samba",
+  "smb",
+  "nfs",
+  "docker",
+  "containerd",
+  "portainer",
+  "home-assistant",
+  "hass",
+  "mosquitto",
+  "zigbee",
+  "adguard",
+  "pihole",
+  "caddy",
+  "nginx",
+  "traefik",
+  "transmission",
+  "qbittorrent",
+  "syncthing",
+  "photoprism",
+];
+
+/** Prefixes that are always system plumbing (hidden when userFacingOnly). */
+export const SYSTEM_UNIT_PREFIXES = [
+  "systemd-",
+  "dbus",
+  "polkit",
+  "udisks",
+  "upower",
+  "accounts-daemon",
+  "avahi",
+  "bluetooth",
+  "getty",
+  "serial-getty",
+  "modprobe",
+  "init.scope",
+  "slices",
+  "sockets.target",
+];
+
+export function isUserFacingUnit(unit: string, description = ""): boolean {
+  const hay = `${unit} ${description}`.toLowerCase();
+  if (SYSTEM_UNIT_PREFIXES.some((p) => unit.toLowerCase().startsWith(p))) return false;
+  if (hay.includes("slice") || hay.includes("socket") || hay.includes("timer")) {
+    // timers/sockets are plumbing unless they match a media pattern
+    if (!USER_FACING_PATTERNS.some((p) => hay.includes(p))) return false;
+  }
+  if (USER_FACING_PATTERNS.some((p) => hay.includes(p))) return true;
+  // default: hide — unknown system services stay out of the way
+  return false;
+}
+
+/** Derive a browsable URL from a known port (detail page link). */
+export function deriveServiceUrl(port: number | undefined): string | null {
+  if (!port) return null;
+  return `http://127.0.0.1:${port}`;
+}
+
+/** Best-effort CPU % + RSS for a PID via /proc (null when unavailable). */
+export async function procStatsForPid(pid: number | null): Promise<{ cpuPercent: number | null; memoryBytes: number | null }> {
+  if (!pid || pid <= 0) return { cpuPercent: null, memoryBytes: null };
+  try {
+    const stat = await fsp.readFile(`/proc/${pid}/stat`, "utf8").catch(() => null);
+    const status = await fsp.readFile(`/proc/${pid}/status`, "utf8").catch(() => null);
+    let memoryBytes: number | null = null;
+    if (status) {
+      const m = /^VmRSS:\s+(\d+)\s+kB/m.exec(status);
+      if (m) memoryBytes = Number(m[1]) * 1024;
+    }
+    // CPU % needs two samples — return null on first call (callers poll getStatus)
+    void stat;
+    return { cpuPercent: null, memoryBytes };
+  } catch {
+    return { cpuPercent: null, memoryBytes: null };
+  }
+}
 
 export class ServiceManagerTag extends Context.Tag("home-server/ServiceManager")<
   ServiceManagerTag,
   {
     readonly list: () => Effect.Effect<ReadonlyArray<ServiceInstance>>;
     readonly get: (id: string) => Effect.Effect<ServiceInstance, ServiceNotFoundError>;
+    readonly getStatus: (id: string) => Effect.Effect<ServiceInstance, ServiceNotFoundError | ServiceSystemError>;
     readonly create: (
       input: Parameters<ServiceManager["create"]>[0],
     ) => Effect.Effect<ServiceDefinition, ServiceAlreadyExistsError | ServiceInvalidIdError>;
+    readonly update: (
+      id: string,
+      patch: Partial<Omit<ServiceDefinition, "id" | "createdAt" | "updatedAt">>,
+    ) => Effect.Effect<ServiceDefinition, ServiceNotFoundError>;
+    readonly delete: (id: string) => Effect.Effect<void, ServiceNotFoundError>;
     readonly start: (id: string) => Effect.Effect<ServiceInstance, ServiceNotFoundError | ServiceDriverError>;
+    readonly stop: (id: string, signal?: string) => Effect.Effect<ServiceInstance, ServiceNotFoundError>;
+    readonly restart: (id: string) => Effect.Effect<ServiceInstance, ServiceNotFoundError | ServiceDriverError>;
+    readonly readLogs: (id: string, tailLines?: number) => Effect.Effect<string, ServiceNotFoundError>;
+    readonly discover: (opts?: {
+      userFacingOnly?: boolean;
+      query?: string;
+      limit?: number;
+    }) => Effect.Effect<ReadonlyArray<import("@home-server/contracts").SystemdUnitSummary>, ServiceSystemError>;
+    readonly setEnabled: (id: string, enabled: boolean) => Effect.Effect<ServiceInstance, ServiceNotFoundError | ServiceSystemError>;
   }
 >() {}
 
@@ -84,6 +240,12 @@ export interface ServiceDriver {
   stop(def: ServiceDefinition, proc: ChildProcess | null, signal?: string): Promise<void>;
   status(def: ServiceDefinition, proc: ChildProcess | null): Promise<{ running: boolean; pid: number | null }>;
   logs(def: ServiceDefinition, tailLines: number): Promise<string>;
+  /** systemd only: is-enabled state, null when unknown */
+  isEnabled?(def: ServiceDefinition): Promise<boolean | null>;
+  /** systemd only: enable/disable at boot */
+  setEnabled?(def: ServiceDefinition, enabled: boolean): Promise<void>;
+  /** systemd only: raw ActiveState/SubState */
+  activeState?(def: ServiceDefinition): Promise<{ active: string | null; sub: string | null }>;
 }
 
 class ShellDriver implements ServiceDriver {
@@ -142,25 +304,26 @@ class ShellDriver implements ServiceDriver {
 
 class SystemdDriver implements ServiceDriver {
   readonly type = "systemd";
+  constructor(private readonly exec: ExecFn = defaultExec) {}
   private unitOf(def: ServiceDefinition): string {
     return def.systemdUnit ?? `${def.id}.service`;
   }
   async start(def: ServiceDefinition): Promise<{ pid: number | null; proc: ChildProcess | null }> {
     const unit = this.unitOf(def);
-    await execFileAsync("systemctl", ["start", unit]);
+    await this.exec("systemctl", ["start", unit]);
     return { pid: null, proc: null };
   }
   async stop(def: ServiceDefinition): Promise<void> {
     const unit = this.unitOf(def);
-    await execFileAsync("systemctl", ["stop", unit]);
+    await this.exec("systemctl", ["stop", unit]);
   }
   async status(def: ServiceDefinition): Promise<{ running: boolean; pid: number | null }> {
     const unit = this.unitOf(def);
     try {
-      await execFileAsync("systemctl", ["is-active", "--quiet", unit]);
+      await this.exec("systemctl", ["is-active", "--quiet", unit]);
       // active
       try {
-        const { stdout } = await execFileAsync("systemctl", ["show", unit, "--property=MainPID", "--value"]);
+        const { stdout } = await this.exec("systemctl", ["show", unit, "--property=MainPID", "--value"]);
         const pid = parseInt(stdout.trim(), 10);
         return { running: true, pid: pid > 0 ? pid : null };
       } catch {
@@ -173,12 +336,48 @@ class SystemdDriver implements ServiceDriver {
   async logs(def: ServiceDefinition, tailLines: number): Promise<string> {
     const unit = this.unitOf(def);
     try {
-      const { stdout } = await execFileAsync("journalctl", ["-u", unit, "-n", String(tailLines), "--no-pager"]);
+      const { stdout } = await this.exec("journalctl", ["-u", unit, "-n", String(tailLines), "--no-pager"]);
       return stdout;
     } catch (e: unknown) {
       return `journalctl failed: ${(e as Error).message}`;
     }
   }
+  async isEnabled(def: ServiceDefinition): Promise<boolean | null> {
+    const unit = this.unitOf(def);
+    try {
+      const { stdout } = await this.exec("systemctl", ["is-enabled", unit]);
+      const v = stdout.trim();
+      if (v === "enabled" || v === "enabled-runtime" || v === "static") return true;
+      if (v === "disabled" || v === "masked") return false;
+      return null;
+    } catch (e: unknown) {
+      // systemctl exits non-zero for disabled/masked — parse stdout when present
+      const out = String((e as { stdout?: unknown })?.stdout ?? "");
+      if (/^disabled/m.test(out) || /disabled/.test((e as Error)?.message ?? "")) return false;
+      if (/^enabled/m.test(out)) return true;
+      return null;
+    }
+  }
+  async setEnabled(def: ServiceDefinition, enabled: boolean): Promise<void> {
+    const unit = this.unitOf(def);
+    await this.exec("systemctl", [enabled ? "enable" : "disable", unit]);
+  }
+  async activeState(def: ServiceDefinition): Promise<{ active: string | null; sub: string | null }> {
+    const unit = this.unitOf(def);
+    try {
+      const { stdout } = await this.exec("systemctl", ["show", unit, "--property=ActiveState", "--property=SubState", "--value"]);
+      // --value with two properties prints two lines
+      const [active, sub] = stdout.trim().split("\n");
+      return { active: active?.trim() || null, sub: sub?.trim() || null };
+    } catch {
+      return { active: null, sub: null };
+    }
+  }
+}
+
+async function defaultExec(cmd: string, args: ReadonlyArray<string>): Promise<{ stdout: string; stderr: string }> {
+  const { stdout, stderr } = await execFileAsync(cmd, [...args]);
+  return { stdout: String(stdout), stderr: String(stderr) };
 }
 
 class DockerDriver implements ServiceDriver {

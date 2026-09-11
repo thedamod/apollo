@@ -1,12 +1,17 @@
 import React, { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Plus } from "lucide-react-native";
 import { theme } from "../../theme";
 import type { RpcClient } from "../../lib/client";
 import { ChipRow, EnvEditor, Segmented, Sheet, TextField, ToggleRow, WizardNav, slugify } from "../../components/Form";
 import { SCRIPT_TEMPLATES } from "./scriptTemplates";
+import type { ParamValues, ScriptParam } from "./params";
+import { defaultParamValues, referencedParamKeys } from "./params";
+import { ParamFields } from "./ParamFields";
+import { ParamEditor, ParamRow } from "./ParamEditor";
 
-const ICONS = ["", "💾", "🐳", "🧹", "🔄", "📊", "🌙", "⚙️"];
-const STEPS = ["Basic", "Execution", "Schedule", "Advanced"];
+const ICONS = ["", "💾", "🐳", "🧹", "🔄", "📊", "🌙", "⚙️", "💡"];
+const STEPS = ["Basic", "Command", "Parameters", "Schedule", "Advanced"];
 
 type Mode = "manual" | "scheduled" | "both";
 type Freq = "daily" | "weekly" | "hourly" | "quarter" | "custom";
@@ -39,6 +44,9 @@ export function ScriptCreateSheet({
   const [cwd, setCwd] = useState("");
   const [runUser, setRunUser] = useState("");
   const [env, setEnv] = useState<Record<string, string>>({});
+  const [params, setParams] = useState<ScriptParam[]>([]);
+  const [editing, setEditing] = useState<number | "new" | null>(null);
+  const [previewOverrides, setPreviewOverrides] = useState<ParamValues>({});
   const [mode, setMode] = useState<Mode>("both");
   const [freq, setFreq] = useState<Freq>("daily");
   const [customCal, setCustomCal] = useState("");
@@ -57,6 +65,9 @@ export function ScriptCreateSheet({
     setCwd("");
     setRunUser("");
     setEnv({});
+    setParams([]);
+    setEditing(null);
+    setPreviewOverrides({});
     setMode("both");
     setFreq("daily");
     setCustomCal("");
@@ -76,6 +87,8 @@ export function ScriptCreateSheet({
     setCommand(t.command);
     setCwd(t.cwd ?? "");
     setMode(t.runMode);
+    setParams(t.params ?? []);
+    setPreviewOverrides({});
     if (t.onCalendar) {
       const hit = (Object.entries(FREQ_CALENDAR) as Array<[Freq, string]>).find(([, v]) => v === t.onCalendar);
       if (hit) setFreq(hit[0]);
@@ -88,8 +101,17 @@ export function ScriptCreateSheet({
   }
 
   const onCalendar = freq === "custom" ? customCal.trim() : FREQ_CALENDAR[freq];
+  // step order: Basic(0) → Command(1) → Parameters(2) → Schedule(3) → Advanced(4)
   const canNext =
-    step === 0 ? name.trim().length > 0 : step === 1 ? command.trim().length > 0 : step === 2 ? mode === "manual" || onCalendar.length > 0 : true;
+    step === 0 ? name.trim().length > 0 : step === 1 ? command.trim().length > 0 : step === 3 ? mode === "manual" || onCalendar.length > 0 : true;
+
+  function updateParams(next: ScriptParam[]) {
+    setParams(next);
+    setPreviewOverrides({});
+  }
+
+  const previewValues: ParamValues = { ...defaultParamValues(params), ...previewOverrides };
+  const missingKeys = referencedParamKeys(command).filter((k) => !params.some((p) => p.key === k));
 
   async function submit() {
     if (!client) return;
@@ -108,6 +130,8 @@ export function ScriptCreateSheet({
         env: envClean,
         runUser: runUser.trim() || undefined,
         runMode: mode,
+        // params travel along once the server increment lands (zod strips until then)
+        params: params.length > 0 ? params : undefined,
         schedule:
           mode === "manual" ? { enabled: false } : { enabled: true, onCalendar, persistent },
         timeoutMs,
@@ -147,7 +171,19 @@ export function ScriptCreateSheet({
       ) : null}
       {step === 1 ? (
         <>
-          <TextField label="Command" value={command} onChange={setCommand} placeholder="df -h /" hint="Runs in a shell on the server." multiline />
+          <TextField
+            label="Command"
+            value={command}
+            onChange={setCommand}
+            placeholder="curl http://nodemcu/cm?brightness={{brightness}}"
+            hint="Runs in a shell on the server. Use {{name}} for parameters."
+            multiline
+          />
+          {missingKeys.length > 0 ? (
+            <Text style={styles.warn}>
+              Referenced but not defined: {missingKeys.map((k) => `{{${k}}}`).join(", ")} — add them under Parameters.
+            </Text>
+          ) : null}
           <TextField label="Working directory" value={cwd} onChange={setCwd} placeholder="/home/apollo (optional)" />
           <TextField
             label="Run as user"
@@ -160,6 +196,52 @@ export function ScriptCreateSheet({
         </>
       ) : null}
       {step === 2 ? (
+        <>
+          <View>
+            <Text style={styles.label}>Inputs — these become the Run screen</Text>
+            <View style={{ gap: 6 }}>
+              {params.map((p, i) => (
+                <ParamRow
+                  key={p.key}
+                  param={p}
+                  onEdit={() => setEditing(i)}
+                  onDelete={() => updateParams(params.filter((_, j) => j !== i))}
+                />
+              ))}
+              {params.length === 0 && editing === null ? (
+                <Text style={styles.muted}>No inputs yet — the script runs as-is.</Text>
+              ) : null}
+            </View>
+            {editing === null ? (
+              <Pressable onPress={() => setEditing("new")} style={styles.addBtn}>
+                <Plus size={14} color={theme.colors.foreground} />
+                <Text style={styles.addLabel}>Add input</Text>
+              </Pressable>
+            ) : null}
+          </View>
+          {editing !== null ? (
+            <ParamEditor
+              initial={typeof editing === "number" ? params[editing] : null}
+              takenKeys={params.filter((_, j) => j !== editing).map((p) => p.key)}
+              onCancel={() => setEditing(null)}
+              onSave={(p) => {
+                if (typeof editing === "number") updateParams(params.map((x, j) => (j === editing ? p : x)));
+                else updateParams([...params, p]);
+                setEditing(null);
+              }}
+            />
+          ) : null}
+          {params.length > 0 ? (
+            <View>
+              <Text style={styles.label}>Preview</Text>
+              <View style={styles.preview}>
+                <ParamFields params={params} values={previewValues} onChange={(v) => setPreviewOverrides(v)} />
+              </View>
+            </View>
+          ) : null}
+        </>
+      ) : null}
+      {step === 3 ? (
         <>
           <Segmented<Mode>
             label="When should it run?"
@@ -193,7 +275,7 @@ export function ScriptCreateSheet({
           ) : null}
         </>
       ) : null}
-      {step === 3 ? (
+      {step === 4 ? (
         <>
           <TextField
             label="Timeout (minutes)"
@@ -225,4 +307,9 @@ const styles = StyleSheet.create({
   chipActive: { borderColor: theme.colors.cpu },
   chipLabel: { color: theme.colors.foreground, fontSize: 13, fontFamily: theme.font.medium },
   error: { color: theme.colors.danger, fontFamily: theme.font.regular, fontSize: 13 },
+  warn: { color: theme.colors.link, fontFamily: theme.font.regular, fontSize: 13 },
+  muted: { color: theme.colors.muted, fontFamily: theme.font.regular, fontSize: 13 },
+  addBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, backgroundColor: theme.colors.cardAlt, borderRadius: 999, paddingVertical: 10, marginTop: 8 },
+  addLabel: { color: theme.colors.foreground, fontFamily: theme.font.medium, fontSize: 13 },
+  preview: { backgroundColor: theme.colors.screen, borderRadius: 14, padding: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: theme.colors.border },
 });

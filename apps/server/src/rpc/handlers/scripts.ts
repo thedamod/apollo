@@ -22,7 +22,7 @@ export function registerScriptHandlers(reg: RpcRegistry, svc: ScriptService): vo
   });
   reg.registerZod(RpcMethod.scriptsUpsert, ScriptUpsertInput, async (p) => svc.upsert(p));
   reg.registerZod(RpcMethod.scriptsDelete, ScriptDeleteInput, async (p) => svc.delete(p.id));
-  reg.registerZod(RpcMethod.scriptsRun, ScriptRunInput, async (p) => svc.runScript(p.id));
+  reg.registerZod(RpcMethod.scriptsRun, ScriptRunInput, async (p) => svc.runScript(p.id, p.params));
   reg.registerZod(RpcMethod.scriptsStop, ScriptStopInput, async (p) => svc.stop(p.runId));
   reg.registerZod(RpcMethod.scriptsLogs, ScriptLogsInput, async (p) => {
     const content = await svc.readLogs(p.runId, p.tailLines);

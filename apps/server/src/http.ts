@@ -215,7 +215,9 @@ export function createHttpApp(opts: {
         res.status(400).json({ error: { code: "invalid_id", message: "body { id } is required" } });
         return;
       }
-      res.json(await opts.scriptService.runScript(id));
+      // timer runs use defaults and never fail on missing required values
+      const params = (req.body as { params?: Record<string, string | number | boolean> } | undefined)?.params;
+      res.json(await opts.scriptService.runScript(id, params, { lenient: true }));
     } catch (e: unknown) {
       const err = e as { code?: string; message?: string };
       res.status(statusForCode(err.code)).json({ error: { code: err.code ?? "unknown", message: err.message ?? String(e) } });

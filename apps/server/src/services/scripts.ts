@@ -8,7 +8,10 @@ import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import type { ScriptDefinition, ScriptRun, ScriptEvent } from "@home-server/contracts";
+import * as Exit from "effect/Exit";
+import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
+import type { ScriptDefinition, ScriptRun, ScriptEvent, ScriptParam } from "@home-server/contracts";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -50,38 +53,171 @@ export class ScriptKillFailedError extends Schema.TaggedError<ScriptKillFailedEr
   }
 }
 
+export class ScriptInvalidParamsError extends Schema.TaggedError<ScriptInvalidParamsError>()(
+  "ScriptInvalidParamsError",
+  { id: Schema.String, issues: Schema.Array(Schema.String) },
+) {
+  get message() {
+    return `Invalid parameters for ${this.id}: ${this.issues.join("; ")}`;
+  }
+}
+
 export type ScriptError =
   | ScriptNotFoundError
   | ScriptInvalidIdError
   | ScriptRunNotFoundError
-  | ScriptKillFailedError;
+  | ScriptKillFailedError
+  | ScriptInvalidParamsError;
 
 // ---------------------------------------------------------------------------
 // Driver abstraction
 // ---------------------------------------------------------------------------
 
 export interface ScriptDriver {
-  run(def: ScriptDefinition, runId: string, logsPath: string): Promise<ChildProcess>;
+  run(
+    def: ScriptDefinition,
+    runId: string,
+    logsPath: string,
+    exec?: { command: string; env?: Record<string, string> },
+  ): Promise<ChildProcess>;
 }
 
+/** Single-quote a value for shell substitution (`{{key}}`). */
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export interface ResolvedScriptParams {
+  /** serialized values actually used (stored on the run) */
+  applied: Record<string, string | number | boolean>;
+  /** command with `{{key}}` substituted (shell-escaped) */
+  command: string;
+  /** `PARAM_KEY` env entries for the resolved values */
+  extraEnv: Record<string, string>;
+}
+
+/**
+ * Validate input against the script's param schema, apply defaults, and
+ * substitute `{{key}}` in the command. Lenient mode (timer runs) fills ""
+ * for missing required values instead of failing.
+ */
+export function resolveScriptParams(
+  scriptId: string,
+  commandTemplate: string,
+  schema: ScriptParam[] | undefined,
+  input: Record<string, string | number | boolean> | undefined,
+  opts?: { lenient?: boolean },
+): ResolvedScriptParams {
+  const params = schema ?? [];
+  const issues: string[] = [];
+  const applied: Record<string, string | number | boolean> = {};
+  const serialized: Record<string, string> = {};
+  for (const p of params) {
+    const raw = input?.[p.key] ?? p.defaultValue;
+    const empty = raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "");
+    if (empty) {
+      if (p.required && !opts?.lenient) issues.push(`${p.key}: required`);
+      applied[p.key] = "";
+      serialized[p.key] = "";
+      continue;
+    }
+    if (p.type === "slider" || p.type === "number") {
+      const n = typeof raw === "number" ? raw : Number(String(raw).trim());
+      if (!Number.isFinite(n)) {
+        issues.push(`${p.key}: must be a number`);
+        applied[p.key] = "";
+        serialized[p.key] = "";
+      } else if (p.min !== undefined && n < p.min) {
+        issues.push(`${p.key}: min ${p.min}`);
+        applied[p.key] = n;
+        serialized[p.key] = String(n);
+      } else if (p.max !== undefined && n > p.max) {
+        issues.push(`${p.key}: max ${p.max}`);
+        applied[p.key] = n;
+        serialized[p.key] = String(n);
+      } else {
+        applied[p.key] = n;
+        serialized[p.key] = String(n);
+      }
+    } else if (p.type === "toggle") {
+      if (typeof raw === "boolean") {
+        applied[p.key] = raw;
+        serialized[p.key] = raw ? "true" : "false";
+      } else {
+        const s = String(raw).trim().toLowerCase();
+        if (["true", "1", "yes", "on"].includes(s)) {
+          applied[p.key] = true;
+          serialized[p.key] = "true";
+        } else if (["false", "0", "no", "off"].includes(s)) {
+          applied[p.key] = false;
+          serialized[p.key] = "false";
+        } else {
+          issues.push(`${p.key}: must be true/false`);
+          applied[p.key] = "";
+          serialized[p.key] = "";
+        }
+      }
+    } else if (p.type === "select") {
+      const s = String(raw);
+      const allowed = (p.options ?? []).map((o) => o.value);
+      if (allowed.length > 0 && !allowed.includes(s)) {
+        issues.push(`${p.key}: pick one of: ${allowed.join(", ")}`);
+        applied[p.key] = s;
+        serialized[p.key] = s;
+      } else {
+        applied[p.key] = s;
+        serialized[p.key] = s;
+      }
+    } else if (p.type === "color") {
+      const s = String(raw).trim();
+      if (!/^#[0-9a-fA-F]{6}$/.test(s)) {
+        issues.push(`${p.key}: use #rrggbb`);
+        applied[p.key] = s;
+        serialized[p.key] = s;
+      } else {
+        applied[p.key] = s;
+        serialized[p.key] = s;
+      }
+    } else {
+      const s = String(raw);
+      applied[p.key] = s;
+      serialized[p.key] = s;
+    }
+  }
+  if (issues.length > 0) throw new ScriptInvalidParamsError({ id: scriptId, issues });
+  const extraEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(serialized)) extraEnv[`PARAM_${k.toUpperCase()}`] = v;
+  // `schema` is contract-validated, so keys are safe placeholder names
+  const command = commandTemplate.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g, (m, k: string) =>
+    k in serialized ? shellEscape(serialized[k]) : m,
+  );
+  return { applied, command, extraEnv };
+}
 class ShellDriver implements ScriptDriver {
-  async run(def: ScriptDefinition, _runId: string, _logsPath: string): Promise<ChildProcess> {
+  async run(
+    def: ScriptDefinition,
+    _runId: string,
+    _logsPath: string,
+    exec?: { command: string; env?: Record<string, string> },
+  ): Promise<ChildProcess> {
     const cwd = def.cwd ?? process.cwd();
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     if (def.env) Object.assign(env, def.env);
+    if (exec?.env) Object.assign(env, exec.env);
+    const command = exec?.command ?? def.command;
     const runUser = def.runUser?.trim();
     if (runUser && runUser !== os.userInfo().username) {
       // run as another system user without a password prompt; fails visibly
       // when sudoers isn't configured for it.
-      return spawn("sudo", ["-n", "-u", runUser, "--", "sh", "-c", def.command], {
+      return spawn("sudo", ["-n", "-u", runUser, "--", "sh", "-c", command], {
         cwd,
         env,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
       });
     }
-    return spawn(def.command, {
+    return spawn(command, {
       cwd,
       env,
       shell: true,
@@ -101,9 +237,13 @@ export class ScriptServiceTag extends Context.Tag("home-server/ScriptService")<
     readonly get: (id: string) => Effect.Effect<ScriptDefinition, ScriptNotFoundError>;
     readonly upsert: (
       input: Omit<ScriptDefinition, "createdAt" | "updatedAt"> & { id?: string },
-    ) => Effect.Effect<ScriptDefinition, ScriptInvalidIdError>;
+    ) => Effect.Effect<ScriptDefinition, ScriptInvalidIdError | ScriptInvalidParamsError>;
     readonly delete: (id: string) => Effect.Effect<void, ScriptNotFoundError>;
-    readonly runScript: (id: string) => Effect.Effect<ScriptRun, ScriptNotFoundError>;
+    readonly runScript: (
+      id: string,
+      params?: Record<string, string | number | boolean>,
+      opts?: { lenient?: boolean },
+    ) => Effect.Effect<ScriptRun, ScriptNotFoundError | ScriptInvalidParamsError>;
     readonly stop: (runId: string) => Effect.Effect<void, ScriptRunNotFoundError | ScriptKillFailedError>;
     readonly getRun: (runId: string) => Effect.Effect<ScriptRun, ScriptRunNotFoundError>;
     readonly readLogs: (runId: string, tailLines?: number) => Effect.Effect<string, ScriptRunNotFoundError>;
@@ -121,6 +261,22 @@ export class ScriptServiceTag extends Context.Tag("home-server/ScriptService")<
 
 function isValidScriptId(id: string): boolean {
   return /^[a-z0-9_-]+$/.test(id);
+}
+
+/**
+ * `Effect.runPromise` rejects with a FiberFailure wrapper, which drops the
+ * TaggedError `_tag` — so legacy wrappers exit via `runPromiseExit` and map
+ * the typed failure to a coded Error the RPC layer understands.
+ */
+function toCodedError<E extends { message: string }>(
+  cause: Cause.Cause<E>,
+  codeFor: (e: E) => string,
+): Error {
+  const failure = Cause.failureOption(cause);
+  if (Option.isSome(failure)) {
+    return Object.assign(new Error(failure.value.message), { code: codeFor(failure.value) });
+  }
+  return new Error(Cause.pretty(cause));
 }
 
 // ---------------------------------------------------------------------------
@@ -276,15 +432,29 @@ export class ScriptService {
       env?: Record<string, string>;
       runUser?: string;
       runMode?: ScriptDefinition["runMode"];
+      params?: ScriptParam[];
       timeoutMs?: number;
       isService?: boolean;
       cron?: string;
       schedule?: { enabled?: boolean; onCalendar?: string; persistent?: boolean };
     },
-  ): Effect.Effect<ScriptDefinition, ScriptInvalidIdError> {
+  ): Effect.Effect<ScriptDefinition, ScriptInvalidIdError | ScriptInvalidParamsError> {
     return Effect.gen(this, function* () {
       const id = input.id ?? `scr_${crypto.randomBytes(4).toString("hex")}`;
       if (!isValidScriptId(id)) return yield* Effect.fail(new ScriptInvalidIdError({ id }));
+      if (input.params) {
+        const seen = new Set<string>();
+        const dupes = new Set<string>();
+        for (const p of input.params) {
+          if (seen.has(p.key)) dupes.add(p.key);
+          seen.add(p.key);
+        }
+        if (dupes.size > 0) {
+          return yield* Effect.fail(
+            new ScriptInvalidParamsError({ id, issues: [...dupes].map((k) => `${k}: duplicate key`) }),
+          );
+        }
+      }
       const now = new Date().toISOString();
       const existing = this.defs.get(id);
       // `cron` is deprecated — fold into schedule so timers stay the one path
@@ -302,6 +472,7 @@ export class ScriptService {
         env: input.env,
         runUser: input.runUser ?? existing?.runUser,
         runMode: input.runMode ?? existing?.runMode ?? "manual",
+        params: input.params ?? existing?.params,
         timeoutMs: input.timeoutMs,
         isService: input.isService ?? false,
         cron: input.cron ?? existing?.cron,
@@ -325,10 +496,21 @@ export class ScriptService {
     });
   }
 
-  runScriptEffect(id: string): Effect.Effect<ScriptRun, ScriptNotFoundError> {
+  runScriptEffect(
+    id: string,
+    params?: Record<string, string | number | boolean>,
+    opts?: { lenient?: boolean },
+  ): Effect.Effect<ScriptRun, ScriptNotFoundError | ScriptInvalidParamsError> {
     return Effect.gen(this, function* () {
       const def = this.defs.get(id);
       if (!def) return yield* Effect.fail(new ScriptNotFoundError({ id }));
+      // validate against the schema + substitute `{{key}}` (typed failure, not a throw)
+      let resolved: ResolvedScriptParams;
+      try {
+        resolved = resolveScriptParams(id, def.command, def.params, params, opts);
+      } catch (cause) {
+        return yield* Effect.fail(cause as ScriptInvalidParamsError);
+      }
       const runId = `run_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
       const logsPath = path.join(this.logsBase, `${runId}.log`);
       const run: ScriptRun = {
@@ -340,16 +522,22 @@ export class ScriptService {
         startedAt: new Date().toISOString(),
         finishedAt: null,
         logsPath,
+        params: resolved.applied,
       };
       this.runs.set(runId, run);
       yield* this.persistRunsEffect();
       yield* Effect.tryPromise({
-        try: () => fsp.writeFile(logsPath, `# ${def.name} — ${def.command}\n# run ${runId} at ${run.startedAt}\n`, "utf8"),
+        try: () =>
+          fsp.writeFile(
+            logsPath,
+            `# ${def.name} — ${def.command}\n# resolved: ${resolved.command}\n# params: ${JSON.stringify(resolved.applied)}\n# run ${runId} at ${run.startedAt}\n`,
+            "utf8",
+          ),
         catch: () => undefined as void,
       }).pipe(Effect.orElseSucceed(() => undefined));
 
       const child = yield* Effect.tryPromise({
-        try: () => this.driver.run(def, runId, logsPath),
+        try: () => this.driver.run(def, runId, logsPath, { command: resolved.command, env: resolved.extraEnv }),
         catch: (cause) => cause as unknown,
       }).pipe(Effect.orDie);
 
@@ -548,16 +736,26 @@ export class ScriptService {
   async upsert(
     input: Parameters<ScriptService["upsertEffect"]>[0],
   ): Promise<ScriptDefinition> {
-    return Effect.runPromise(this.upsertEffect(input));
+    const exit = await Effect.runPromiseExit(this.upsertEffect(input));
+    if (Exit.isSuccess(exit)) return exit.value;
+    throw toCodedError(exit.cause, (e) => (e._tag === "ScriptInvalidIdError" ? "invalid_id" : "invalid_params"));
   }
   async delete(id: string): Promise<void> {
     return Effect.runPromise(this.deleteEffect(id).pipe(Effect.catchAll((e) => Effect.fail(Object.assign(new Error(e.message), { code: "not_found" })))));
   }
-  async runScript(id: string): Promise<ScriptRun> {
-    return Effect.runPromise(this.runScriptEffect(id).pipe(Effect.catchAll((e) => Effect.fail(Object.assign(new Error(e.message), { code: "not_found" })))));
+  async runScript(
+    id: string,
+    params?: Record<string, string | number | boolean>,
+    opts?: { lenient?: boolean },
+  ): Promise<ScriptRun> {
+    const exit = await Effect.runPromiseExit(this.runScriptEffect(id, params, opts));
+    if (Exit.isSuccess(exit)) return exit.value;
+    throw toCodedError(exit.cause, (e) => (e._tag === "ScriptNotFoundError" ? "not_found" : "invalid_params"));
   }
   async stop(runId: string): Promise<void> {
-    return Effect.runPromise(this.stopEffect(runId).pipe(Effect.catchAll((e) => Effect.fail(Object.assign(new Error(e.message), { code: e._tag === "ScriptRunNotFoundError" ? "not_found" : "kill_failed" })))));
+    const exit = await Effect.runPromiseExit(this.stopEffect(runId));
+    if (Exit.isSuccess(exit)) return exit.value;
+    throw toCodedError(exit.cause, (e) => (e._tag === "ScriptRunNotFoundError" ? "not_found" : "kill_failed"));
   }
   getRun(runId: string): ScriptRun | undefined {
     return this.runs.get(runId);
@@ -589,7 +787,7 @@ export const ScriptServiceLive = (
       get: (id) => svc.getEffect(id),
       upsert: (input) => svc.upsertEffect(input),
       delete: (id) => svc.deleteEffect(id),
-      runScript: (id) => svc.runScriptEffect(id),
+      runScript: (id, params, opts) => svc.runScriptEffect(id, params, opts),
       stop: (runId) => svc.stopEffect(runId),
       getRun: (runId) => svc.getRunEffect(runId),
       readLogs: (runId, tailLines) => svc.readLogsEffect(runId, tailLines),

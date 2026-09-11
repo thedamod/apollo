@@ -10,6 +10,39 @@ export type ScriptStatus = z.infer<typeof ScriptStatus>;
 export const ScriptRunMode = z.enum(["manual", "scheduled", "both"]);
 export type ScriptRunMode = z.infer<typeof ScriptRunMode>;
 
+// --- parameterized actions: schema → generated mobile UI → values → execution ---
+
+export const ScriptParamType = z.enum(["slider", "number", "text", "toggle", "select", "color", "file"]);
+export type ScriptParamType = z.infer<typeof ScriptParamType>;
+
+export const ScriptParamOption = z.object({
+  value: z.string().min(1).max(128),
+  label: z.string().min(1).max(128),
+});
+export type ScriptParamOption = z.infer<typeof ScriptParamOption>;
+
+export const ScriptParam = z.object({
+  /** `{{key}}` in the command + `PARAM_KEY` in the environment */
+  key: z.string().min(1).max(64).regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/),
+  type: ScriptParamType,
+  label: z.string().min(1).max(128),
+  defaultValue: z.union([z.string().max(1024), z.number(), z.boolean()]).optional(),
+  min: z.number().optional(),
+  max: z.number().optional(),
+  step: z.number().positive().optional(),
+  unit: z.string().max(32).optional(),
+  required: z.boolean().optional(),
+  /** select only */
+  options: z.array(ScriptParamOption).max(100).optional(),
+  placeholder: z.string().max(256).optional(),
+  hint: z.string().max(512).optional(),
+});
+export type ScriptParam = z.infer<typeof ScriptParam>;
+
+/** Raw values as sent by clients (`scripts.run { params }`). */
+export const ScriptParamValue = z.union([z.string().max(4096), z.number(), z.boolean()]);
+export type ScriptParamValue = z.infer<typeof ScriptParamValue>;
+
 export const ScriptSchedule = z.object({
   /** backed by a systemd timer underneath; UI only exposes on/off + plain schedule */
   enabled: z.boolean().optional().default(false),
@@ -41,6 +74,8 @@ export const ScriptDefinition = z.object({
   runUser: z.string().max(64).optional(),
   /** manual (Run button only), scheduled (timer only), or both */
   runMode: ScriptRunMode.optional().default("manual"),
+  /** parameter schema — the app generates the Run screen from this */
+  params: z.array(ScriptParam).max(50).optional(),
   timeoutMs: z.number().int().min(1000).max(86_400_000).optional(), // default no timeout
   // service mode: keep running, restart on failure, monitor
   isService: z.boolean().optional().default(false),
@@ -60,6 +95,8 @@ export const ScriptRun = z.object({
   startedAt: z.string(),
   finishedAt: z.string().nullable(),
   logsPath: z.string().nullable(), // absolute path on server
+  /** serialized parameter values this run executed with */
+  params: z.record(z.string(), ScriptParamValue).optional(),
 });
 export type ScriptRun = z.infer<typeof ScriptRun>;
 
@@ -105,6 +142,7 @@ export const ScriptUpsertInput = z.object({
   env: z.record(z.string(), z.string()).optional(),
   runUser: z.string().max(64).optional(),
   runMode: ScriptRunMode.optional(),
+  params: z.array(ScriptParam).max(50).optional(),
   timeoutMs: z.number().int().min(1000).max(86_400_000).optional(),
   isService: z.boolean().optional(),
   cron: z.string().max(128).optional(),
@@ -115,7 +153,11 @@ export type ScriptUpsertInput = z.infer<typeof ScriptUpsertInput>;
 export const ScriptDeleteInput = z.object({ id: z.string().min(1) });
 export type ScriptDeleteInput = z.infer<typeof ScriptDeleteInput>;
 
-export const ScriptRunInput = z.object({ id: z.string().min(1) });
+export const ScriptRunInput = z.object({
+  id: z.string().min(1),
+  /** values for the script's `params` schema (defaults apply when omitted) */
+  params: z.record(z.string(), ScriptParamValue).optional(),
+});
 export type ScriptRunInput = z.infer<typeof ScriptRunInput>;
 
 export const ScriptStopInput = z.object({ runId: z.string().min(1) });

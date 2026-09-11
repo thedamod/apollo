@@ -103,7 +103,9 @@ async function main(): Promise<void> {
   // services (extensible — all constructed here, injected into registry)
   const filesystemService = new FilesystemService();
   const systemService = new SystemService();
-  const scriptService = new ScriptService(config.scriptsPath, config.logsDir);
+  const scriptService = new ScriptService(config.scriptsPath, config.logsDir, undefined, {
+    timerCallback: { port: config.port, tokenPath: config.tokenPath },
+  });
   await scriptService.init();
   const serviceManager = new ServiceManager(config.servicesPath, config.logsDir);
   await serviceManager.init();
@@ -121,7 +123,7 @@ async function main(): Promise<void> {
   registerServiceHandlers(registry, serviceManager);
   registerTunnelHandlers(registry, tunnelService);
 
-  const app = createHttpApp({ config, token, systemService, filesystemService });
+  const app = createHttpApp({ config, token, systemService, filesystemService, scriptService });
   const server = http.createServer(app);
 
   attachWsRouter({

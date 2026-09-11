@@ -95,7 +95,10 @@ export class ScriptServiceTag extends Context.Tag("home-server/ScriptService")<
     readonly stop: (runId: string) => Effect.Effect<void, ScriptRunNotFoundError | ScriptKillFailedError>;
     readonly getRun: (runId: string) => Effect.Effect<ScriptRun, ScriptRunNotFoundError>;
     readonly readLogs: (runId: string, tailLines?: number) => Effect.Effect<string, ScriptRunNotFoundError>;
-    readonly listRuns: () => Effect.Effect<ReadonlyArray<ScriptRun>>;
+    readonly listRuns: (filter?: {
+      scriptId?: string;
+      limit?: number;
+    }) => Effect.Effect<ReadonlyArray<ScriptRun>>;
     readonly onEvent: (listener: (ev: ScriptEvent) => void) => Effect.Effect<() => void>;
   }
 >() {}
@@ -117,13 +120,25 @@ export class ScriptService {
   private runs = new Map<string, ScriptRun>();
   private children = new Map<string, ChildProcess>();
   private listeners = new Set<(ev: ScriptEvent) => void>();
+  private readonly runsPath: string;
+  /**
+   * Loopback info so systemd timers can trigger runs through the daemon
+   * (`POST /api/scripts/run`). Timers read the token from disk at fire time.
+   */
+  private readonly timerCallback: { port: number; tokenPath: string } | null;
+
+  /** Max persisted runs (ring buffer — keeps history bounded on disk). */
+  static readonly MAX_PERSISTED_RUNS = 500;
 
   constructor(
     private readonly scriptsPath: string,
     private readonly logsBase: string,
     private readonly driver: ScriptDriver = new ShellDriver(),
+    opts?: { runsPath?: string; timerCallback?: { port: number; tokenPath: string } },
   ) {
     this.logsBase = path.join(logsBase, "scripts");
+    this.runsPath = opts?.runsPath ?? path.join(path.dirname(scriptsPath), "script-runs.json");
+    this.timerCallback = opts?.timerCallback ?? null;
   }
 
   async init(): Promise<void> {
@@ -153,6 +168,30 @@ export class ScriptService {
             for (const d of arr) this.defs.set(d.id, d);
           } catch {}
         }
+        // run history (best-effort — survives restarts so cards show last run)
+        const runsRaw = yield* Effect.tryPromise({
+          try: () => fsp.readFile(this.runsPath, "utf8"),
+          catch: (cause) => cause as unknown,
+        }).pipe(
+          Effect.catchAll(() => Effect.succeed(null as string | null)),
+        );
+        if (runsRaw) {
+          try {
+            const arr = JSON.parse(runsRaw) as ScriptRun[];
+            for (const r of arr) {
+              // in-flight runs from a previous life are marked error (process gone)
+              if (r.status === "running") {
+                this.runs.set(r.runId, { ...r, status: "error", finishedAt: r.finishedAt ?? new Date().toISOString() });
+              } else {
+                this.runs.set(r.runId, r);
+              }
+            }
+          } catch {}
+        }
+        // re-apply schedules (timers may have been removed while we were down)
+        for (const def of this.defs.values()) {
+          yield* this.syncScheduleEffect(def);
+        }
       }),
     );
   }
@@ -162,6 +201,22 @@ export class ScriptService {
       try: () => fsp.writeFile(this.scriptsPath, JSON.stringify([...this.defs.values()], null, 2) + "\n", "utf8"),
       catch: () => undefined as void,
     }).pipe(Effect.orElseSucceed(() => undefined));
+  }
+
+  private persistRunsEffect(): Effect.Effect<void, never> {
+    return Effect.tryPromise({
+      try: () => {
+        const all = [...this.runs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+        const capped = all.slice(0, ScriptService.MAX_PERSISTED_RUNS);
+        return fsp.writeFile(this.runsPath, JSON.stringify(capped, null, 2) + "\n", "utf8");
+      },
+      catch: () => undefined as void,
+    }).pipe(Effect.orElseSucceed(() => undefined));
+  }
+
+  private persistRunsSoon(): void {
+    // fire-and-forget (startup/restart paths call init which awaits separately)
+    Effect.runPromise(this.persistRunsEffect()).catch(() => {});
   }
 
   private async persist(): Promise<void> {
@@ -209,6 +264,7 @@ export class ScriptService {
       timeoutMs?: number;
       isService?: boolean;
       cron?: string;
+      schedule?: { enabled?: boolean; onCalendar?: string; persistent?: boolean };
     },
   ): Effect.Effect<ScriptDefinition, ScriptInvalidIdError> {
     return Effect.gen(this, function* () {
@@ -216,6 +272,11 @@ export class ScriptService {
       if (!isValidScriptId(id)) return yield* Effect.fail(new ScriptInvalidIdError({ id }));
       const now = new Date().toISOString();
       const existing = this.defs.get(id);
+      // `cron` is deprecated — fold into schedule so timers stay the one path
+      const rawSchedule = input.schedule ?? (input.cron ? { enabled: false, persistent: false, onCalendar: input.cron } : existing?.schedule);
+      const schedule = rawSchedule
+        ? { enabled: rawSchedule.enabled ?? false, persistent: rawSchedule.persistent ?? false, onCalendar: rawSchedule.onCalendar }
+        : undefined;
       const def: ScriptDefinition = {
         id,
         name: input.name,
@@ -225,12 +286,14 @@ export class ScriptService {
         env: input.env,
         timeoutMs: input.timeoutMs,
         isService: input.isService ?? false,
-        cron: input.cron,
+        cron: input.cron ?? existing?.cron,
+        schedule,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
       };
       this.defs.set(id, def);
       yield* this.persistEffect();
+      yield* this.syncScheduleEffect(def);
       return def;
     });
   }
@@ -240,6 +303,7 @@ export class ScriptService {
       if (!this.defs.has(id)) return yield* Effect.fail(new ScriptNotFoundError({ id }));
       this.defs.delete(id);
       yield* this.persistEffect();
+      yield* this.clearScheduleEffect(id);
     });
   }
 
@@ -260,6 +324,7 @@ export class ScriptService {
         logsPath,
       };
       this.runs.set(runId, run);
+      yield* this.persistRunsEffect();
       yield* Effect.tryPromise({
         try: () => fsp.writeFile(logsPath, `# ${def.name} — ${def.command}\n# run ${runId} at ${run.startedAt}\n`, "utf8"),
         catch: () => undefined as void,
@@ -308,6 +373,7 @@ export class ScriptService {
         };
         this.runs.set(runId, finished);
         this.children.delete(runId);
+        this.persistRunsSoon();
         this.emit({ type: "finished", run: { ...finished } });
       });
       child.on("error", (err: Error) => {
@@ -321,6 +387,7 @@ export class ScriptService {
         };
         this.runs.set(runId, finished);
         this.children.delete(runId);
+        this.persistRunsSoon();
         this.emit({ type: "error", runId, scriptId: id, message: err.message });
       });
 
@@ -372,8 +439,84 @@ export class ScriptService {
     });
   }
 
-  listRunsEffect(): Effect.Effect<ReadonlyArray<ScriptRun>> {
-    return Effect.succeed([...this.runs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)));
+  listRunsEffect(filter?: { scriptId?: string; limit?: number }): Effect.Effect<ReadonlyArray<ScriptRun>> {
+    return Effect.succeed(
+      [...this.runs.values()]
+        .filter((r) => (!filter?.scriptId ? true : r.scriptId === filter.scriptId))
+        .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+        .slice(0, filter?.limit ?? 50),
+    );
+  }
+
+  /** Last + active run for a script — powers cards (last run/status) and detail (history). */
+  lastAndActiveRun(scriptId: string): { lastRun: ScriptRun | null; activeRun: ScriptRun | null } {
+    const runs = [...this.runs.values()]
+      .filter((r) => r.scriptId === scriptId)
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    return {
+      lastRun: runs[0] ?? null,
+      activeRun: runs.find((r) => r.status === "running") ?? null,
+    };
+  }
+
+  // ---- Scheduling via systemd timers (underlying impl; UI exposes on/off + schedule) ----
+
+  private timerUnitName(id: string): string {
+    return `home-server-script-${id}.timer`;
+  }
+
+  private syncScheduleEffect(def: ScriptDefinition): Effect.Effect<void, never> {
+    const schedule = def.schedule;
+    const enabled = schedule?.enabled && !!schedule.onCalendar;
+    return Effect.tryPromise({
+      try: () => this.applyTimer(def.id, enabled ? schedule!.onCalendar! : null, schedule?.persistent ?? false),
+      catch: () => undefined as void,
+    }).pipe(Effect.orElseSucceed(() => undefined));
+  }
+
+  private clearScheduleEffect(id: string): Effect.Effect<void, never> {
+    return Effect.tryPromise({
+      try: () => this.applyTimer(id, null, false),
+      catch: () => undefined as void,
+    }).pipe(Effect.orElseSucceed(() => undefined));
+  }
+
+  /**
+   * Create/remove a user-level systemd timer that triggers a script run
+   * through the daemon (`POST /api/scripts/run`), so timer-triggered runs
+   * flow through the normal run path (history, logs, live output).
+   * Best-effort: no-ops when no user systemd instance is available
+   * (dev machines, tests) — the schedule stays stored as intent.
+   */
+  private async applyTimer(scriptId: string, onCalendar: string | null, persistent: boolean): Promise<void> {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    try {
+      await execFileAsync("systemctl", ["--user", "show", "-p", "Id", this.timerUnitName(scriptId)]);
+    } catch {
+      // no user systemd — skip silently (schedule stays stored as intent)
+      return;
+    }
+    if (!this.timerCallback) return;
+    const os = await import("node:os");
+    const dir = path.join(os.homedir(), ".config", "systemd", "user");
+    const base = `home-server-script-${scriptId}`;
+    if (!onCalendar) {
+      await execFileAsync("systemctl", ["--user", "disable", "--now", `${base}.timer`]).catch(() => {});
+      return;
+    }
+    const { port, tokenPath } = this.timerCallback;
+    const url = `http://127.0.0.1:${port}/api/scripts/run`;
+    // Token is read from disk at fire time (never baked into the unit file).
+    const trigger = `/bin/sh -c 'TOKEN=$(cat "${tokenPath.replace(/"/g, "")}"); curl -s -X POST "${url}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{\\"id\\":\\"${scriptId}\\"}"'`;
+    const serviceUnit = `[Unit]\nDescription=home-server script ${scriptId}\n\n[Service]\nType=oneshot\nExecStart=${trigger}\n`;
+    const timerUnit = `[Unit]\nDescription=Run home-server script ${scriptId}\n\n[Timer]\nOnCalendar=${onCalendar}\n${persistent ? "Persistent=true\n" : ""}[Install]\nWantedBy=timers.target\n`;
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, `${base}.service`), serviceUnit, "utf8");
+    await fsp.writeFile(path.join(dir, `${base}.timer`), timerUnit, "utf8");
+    await execFileAsync("systemctl", ["--user", "daemon-reload"]).catch(() => {});
+    await execFileAsync("systemctl", ["--user", "enable", "--now", `${base}.timer`]);
   }
 
   // ---- Legacy Promise wrappers (keep existing handlers working) ----
@@ -407,20 +550,32 @@ export class ScriptService {
   listRuns(): ScriptRun[] {
     return [...this.runs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
   }
+
+  listRunsFiltered(filter?: { scriptId?: string; limit?: number }): ScriptRun[] {
+    return [...this.runs.values()]
+      .filter((r) => (!filter?.scriptId ? true : r.scriptId === filter.scriptId))
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+      .slice(0, filter?.limit ?? 50);
+  }
 }
 
-export const ScriptServiceLive = Layer.succeed(
-  ScriptServiceTag,
-  ScriptServiceTag.of({
-    list: () => Effect.succeed([]),
-    get: () => Effect.fail(new ScriptNotFoundError({ id: "noop" })),
-    upsert: () => Effect.fail(new ScriptInvalidIdError({ id: "noop" })),
-    delete: () => Effect.succeed(undefined),
-    runScript: () => Effect.fail(new ScriptNotFoundError({ id: "noop" })),
-    stop: () => Effect.succeed(undefined),
-    getRun: () => Effect.fail(new ScriptRunNotFoundError({ runId: "noop" })),
-    readLogs: () => Effect.succeed(""),
-    listRuns: () => Effect.succeed([]),
-    onEvent: () => Effect.succeed(() => {}),
-  }),
-);
+export const ScriptServiceLive = (
+  scriptsPath: string,
+  logsBase: string,
+  opts?: { runsPath?: string; timerCallback?: { port: number; tokenPath: string } },
+) =>
+  Layer.sync(ScriptServiceTag, () => {
+    const svc = new ScriptService(scriptsPath, logsBase, undefined, opts);
+    return ScriptServiceTag.of({
+      list: () => svc.listEffect(),
+      get: (id) => svc.getEffect(id),
+      upsert: (input) => svc.upsertEffect(input),
+      delete: (id) => svc.deleteEffect(id),
+      runScript: (id) => svc.runScriptEffect(id),
+      stop: (runId) => svc.stopEffect(runId),
+      getRun: (runId) => svc.getRunEffect(runId),
+      readLogs: (runId, tailLines) => svc.readLogsEffect(runId, tailLines),
+      listRuns: (filter) => svc.listRunsEffect(filter),
+      onEvent: (listener) => svc.onEventEffect(listener),
+    });
+  });

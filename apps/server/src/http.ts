@@ -11,12 +11,14 @@ import type { ServerConfig } from "./config.ts";
 import { logger } from "./logger.ts";
 import type { SystemService } from "./services/system.ts";
 import type { FilesystemService } from "./services/filesystem.ts";
+import type { ScriptService } from "./services/scripts.ts";
 
 export function createHttpApp(opts: {
   config: ServerConfig;
   token: string;
   systemService: SystemService;
   filesystemService: FilesystemService;
+  scriptService?: ScriptService;
 }): express.Express {
   const app = express();
   app.use(cors());
@@ -197,6 +199,26 @@ export function createHttpApp(opts: {
       res.json(stats);
     } catch (e: unknown) {
       res.status(500).json({ error: { message: (e as Error).message ?? String(e) } });
+    }
+  });
+
+  // Timer callback target: systemd timers POST here to trigger a script run
+  // through the normal run path (history, logs, live WS output).
+  app.post("/api/scripts/run", async (req, res) => {
+    try {
+      if (!opts.scriptService) {
+        res.status(501).json({ error: { code: "not_implemented", message: "scripts unavailable" } });
+        return;
+      }
+      const id = String((req.body as { id?: unknown } | undefined)?.id ?? "");
+      if (!id.trim()) {
+        res.status(400).json({ error: { code: "invalid_id", message: "body { id } is required" } });
+        return;
+      }
+      res.json(await opts.scriptService.runScript(id));
+    } catch (e: unknown) {
+      const err = e as { code?: string; message?: string };
+      res.status(statusForCode(err.code)).json({ error: { code: err.code ?? "unknown", message: err.message ?? String(e) } });
     }
   });
 

@@ -58,6 +58,8 @@ import {
   ServiceStatusInput,
   ServiceDiscoverInput,
   ServiceSetEnabledInput,
+  ServiceDockerListInput,
+  DockerContainerSummary,
   ServiceInstance,
   SystemdUnitSummary,
 } from "./services.ts";
@@ -113,6 +115,7 @@ export const RpcMethod = {
   servicesSubscribe: "services.subscribe",
   servicesDiscover: "services.discover",
   servicesSetEnabled: "services.setEnabled",
+  servicesDockerList: "services.dockerList",
 
   // tunnel
   tunnelGet: "tunnel.get",
@@ -199,6 +202,7 @@ export const RpcSchemas = {
   [RpcMethod.servicesStatus]: { input: ServiceStatusInput, output: ServiceInstance },
   [RpcMethod.servicesDiscover]: { input: ServiceDiscoverInput ?? z.object({}), output: z.array(SystemdUnitSummary) },
   [RpcMethod.servicesSetEnabled]: { input: ServiceSetEnabledInput, output: ServiceInstance },
+  [RpcMethod.servicesDockerList]: { input: ServiceDockerListInput ?? z.object({}), output: z.array(DockerContainerSummary) },
   [RpcMethod.tunnelGet]: { input: z.object({}), output: TunnelInfo },
   [RpcMethod.tunnelConfigure]: { input: TunnelConfigureInput, output: TunnelInfo },
   [RpcMethod.serverProbe]: { input: z.object({}), output: z.object({ ok: z.boolean() }) },

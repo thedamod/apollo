@@ -3,6 +3,13 @@ import { z } from "zod";
 export const ScriptStatus = z.enum(["idle", "running", "success", "error", "killed"]);
 export type ScriptStatus = z.infer<typeof ScriptStatus>;
 
+/**
+ * How a script is triggered: by hand, on a schedule, or both.
+ * The schedule itself is `schedule` (systemd timer underneath).
+ */
+export const ScriptRunMode = z.enum(["manual", "scheduled", "both"]);
+export type ScriptRunMode = z.infer<typeof ScriptRunMode>;
+
 export const ScriptSchedule = z.object({
   /** backed by a systemd timer underneath; UI only exposes on/off + plain schedule */
   enabled: z.boolean().optional().default(false),
@@ -25,9 +32,15 @@ export const ScriptDefinition = z.object({
   id: z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/),
   name: z.string().min(1).max(128),
   description: z.string().max(1024).optional().default(""),
+  /** short icon key shown in the UI (emoji or lucide name), e.g. "💾" */
+  icon: z.string().max(64).optional(),
   command: z.string().min(1).max(4096), // shell command
   cwd: z.string().max(512).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  /** system user to run as (via `sudo -n -u`); defaults to the server user */
+  runUser: z.string().max(64).optional(),
+  /** manual (Run button only), scheduled (timer only), or both */
+  runMode: ScriptRunMode.optional().default("manual"),
   timeoutMs: z.number().int().min(1000).max(86_400_000).optional(), // default no timeout
   // service mode: keep running, restart on failure, monitor
   isService: z.boolean().optional().default(false),
@@ -86,9 +99,12 @@ export const ScriptUpsertInput = z.object({
   id: z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/).optional(),
   name: z.string().min(1).max(128),
   description: z.string().max(1024).optional(),
+  icon: z.string().max(64).optional(),
   command: z.string().min(1).max(4096),
   cwd: z.string().max(512).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  runUser: z.string().max(64).optional(),
+  runMode: ScriptRunMode.optional(),
   timeoutMs: z.number().int().min(1000).max(86_400_000).optional(),
   isService: z.boolean().optional(),
   cron: z.string().max(128).optional(),

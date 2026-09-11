@@ -44,6 +44,8 @@ export const ServiceDefinition = z.object({
   id: z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/),
   name: z.string().min(1).max(128),
   description: z.string().max(2048).optional().default(""),
+  /** short icon key shown in the UI (emoji or lucide name), e.g. "🎬" */
+  icon: z.string().max(64).optional(),
   // For type=shell: shell command. For systemd: ignored, uses systemdUnit. For docker: image or compose.
   command: z.string().min(1).max(4096),
   type: ServiceType.optional().default("shell"),
@@ -118,6 +120,7 @@ export const ServiceCreateInput = z.object({
   id: z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/).optional(),
   name: z.string().min(1).max(128),
   description: z.string().max(2048).optional(),
+  icon: z.string().max(64).optional(),
   command: z.string().min(1).max(4096),
   type: ServiceType.optional(),
   systemdUnit: z.string().max(128).optional(),
@@ -194,3 +197,25 @@ export const ServiceSetEnabledInput = z.object({
   enabled: z.boolean(),
 });
 export type ServiceSetEnabledInput = z.infer<typeof ServiceSetEnabledInput>;
+
+// --- docker discovery: powers the "from a container" creation flow ---
+
+export const DockerContainerSummary = z.object({
+  name: z.string(),
+  image: z.string(),
+  state: z.string().optional().default(""),
+  status: z.string().optional().default(""),
+  running: z.boolean(),
+  /** matches a managed service id, if any */
+  managedId: z.string().nullable().optional(),
+});
+export type DockerContainerSummary = z.infer<typeof DockerContainerSummary>;
+
+export const ServiceDockerListInput = z
+  .object({
+    /** optional substring filter on name / image */
+    query: z.string().max(128).optional(),
+    limit: z.number().int().min(1).max(200).optional().default(100),
+  })
+  .optional();
+export type ServiceDockerListInput = z.infer<typeof ServiceDockerListInput>;

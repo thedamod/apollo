@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Plus } from "lucide-react-native";
 import { theme } from "../theme";
 import type { RpcClient } from "../lib/client";
 import { Card } from "../components/Card";
+import { ServiceCreateSheet } from "../features/services/ServiceCreateSheet";
 import { Placeholder } from "./Files";
 
 interface Service {
@@ -18,6 +20,7 @@ export function ServicesScreen({ client }: { client: RpcClient | null }) {
   const [services, setServices] = useState<Service[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
   async function refresh(c: RpcClient) {
     try {
@@ -65,7 +68,12 @@ export function ServicesScreen({ client }: { client: RpcClient | null }) {
 
   return (
     <View style={styles.root}>
-      <Text style={styles.title}>Services</Text>
+      <View style={styles.header}>
+        <Text style={styles.title}>Services</Text>
+        <Pressable onPress={() => setCreating(true)} style={styles.add} hitSlop={8}>
+          <Plus size={18} color={theme.colors.foreground} />
+        </Pressable>
+      </View>
       {busy ? <ActivityIndicator color={theme.colors.foreground} style={{ marginTop: 16 }} /> : null}
       {error ? <Text style={styles.error}>{error}</Text> : null}
       <ScrollView contentContainerStyle={{ gap: 8, paddingVertical: 12 }}>
@@ -91,16 +99,27 @@ export function ServicesScreen({ client }: { client: RpcClient | null }) {
           );
         })}
         {services.length === 0 && !busy ? (
-          <Text style={styles.empty}>No services yet. Create one (e.g. Jellyfin) from a desktop client or the API.</Text>
+          <Text style={styles.empty}>No services yet. Tap + to add one.</Text>
         ) : null}
       </ScrollView>
+      <ServiceCreateSheet
+        visible={creating}
+        client={client}
+        onClose={() => setCreating(false)}
+        onCreated={() => {
+          setCreating(false);
+          if (client) refresh(client);
+        }}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.colors.screen, padding: 16 },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   title: { color: theme.colors.foreground, fontSize: 26, fontFamily: theme.font.bold },
+  add: { backgroundColor: theme.colors.cardAlt, borderRadius: 999, padding: 9 },
   row: { flexDirection: "row", alignItems: "center", gap: 10 },
   dot: { width: 10, height: 10, borderRadius: 5 },
   name: { color: theme.colors.foreground, fontSize: 16, fontFamily: theme.font.bold },

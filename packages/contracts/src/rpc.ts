@@ -40,6 +40,8 @@ import {
   ScriptRunInput,
   ScriptStopInput,
   ScriptLogsInput,
+  ScriptRunsInput,
+  ScriptGetRunInput,
   ScriptRun,
 } from "./scripts.ts";
 import {
@@ -54,7 +56,10 @@ import {
   ServiceRestartInput,
   ServiceLogsInput,
   ServiceStatusInput,
+  ServiceDiscoverInput,
+  ServiceSetEnabledInput,
   ServiceInstance,
+  SystemdUnitSummary,
 } from "./services.ts";
 import { TunnelConfigureInput, TunnelInfo } from "./tunnel.ts";
 
@@ -91,6 +96,8 @@ export const RpcMethod = {
   scriptsRun: "scripts.run",
   scriptsStop: "scripts.stop",
   scriptsLogs: "scripts.logs",
+  scriptsRuns: "scripts.runs",
+  scriptsGetRun: "scripts.getRun",
 
   // services (long-running, e.g. jellyfin) — supervised
   servicesList: "services.list",
@@ -104,6 +111,8 @@ export const RpcMethod = {
   servicesLogs: "services.logs",
   servicesStatus: "services.status",
   servicesSubscribe: "services.subscribe",
+  servicesDiscover: "services.discover",
+  servicesSetEnabled: "services.setEnabled",
 
   // tunnel
   tunnelGet: "tunnel.get",
@@ -176,6 +185,8 @@ export const RpcSchemas = {
   [RpcMethod.scriptsRun]: { input: ScriptRunInput, output: ScriptRun },
   [RpcMethod.scriptsStop]: { input: ScriptStopInput, output: z.void() },
   [RpcMethod.scriptsLogs]: { input: ScriptLogsInput, output: z.object({ runId: z.string(), content: z.string() }) },
+  [RpcMethod.scriptsRuns]: { input: ScriptRunsInput ?? z.object({}), output: z.array(ScriptRun) },
+  [RpcMethod.scriptsGetRun]: { input: ScriptGetRunInput, output: ScriptRun },
   [RpcMethod.servicesList]: { input: ServiceListInput ?? z.object({}), output: z.array(ServiceInstance) },
   [RpcMethod.servicesGet]: { input: ServiceGetInput, output: ServiceInstance },
   [RpcMethod.servicesCreate]: { input: ServiceCreateInput, output: ServiceDefinition },
@@ -186,6 +197,8 @@ export const RpcSchemas = {
   [RpcMethod.servicesRestart]: { input: ServiceRestartInput, output: ServiceInstance },
   [RpcMethod.servicesLogs]: { input: ServiceLogsInput, output: z.object({ id: z.string(), content: z.string() }) },
   [RpcMethod.servicesStatus]: { input: ServiceStatusInput, output: ServiceInstance },
+  [RpcMethod.servicesDiscover]: { input: ServiceDiscoverInput ?? z.object({}), output: z.array(SystemdUnitSummary) },
+  [RpcMethod.servicesSetEnabled]: { input: ServiceSetEnabledInput, output: ServiceInstance },
   [RpcMethod.tunnelGet]: { input: z.object({}), output: TunnelInfo },
   [RpcMethod.tunnelConfigure]: { input: TunnelConfigureInput, output: TunnelInfo },
   [RpcMethod.serverProbe]: { input: z.object({}), output: z.object({ ok: z.boolean() }) },

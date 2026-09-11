@@ -11,6 +11,7 @@ import {
   ServiceStatusInput,
   ServiceDiscoverInput,
   ServiceSetEnabledInput,
+  ServiceDockerListInput,
 } from "@home-server/contracts";
 import type { RpcRegistry } from "../registry.ts";
 import type { ServiceManager } from "../../services/serviceManager.ts";
@@ -38,4 +39,5 @@ export function registerServiceHandlers(reg: RpcRegistry, svc: ServiceManager): 
   reg.registerZod(RpcMethod.servicesStatus, ServiceStatusInput, async (p) => svc.getStatus(p.id));
   reg.registerZod(RpcMethod.servicesDiscover, ServiceDiscoverInput, async (p) => svc.discover(p ?? {}));
   reg.registerZod(RpcMethod.servicesSetEnabled, ServiceSetEnabledInput, async (p) => svc.setEnabled(p.id, p.enabled));
+  reg.registerZod(RpcMethod.servicesDockerList, ServiceDockerListInput, async (p) => svc.dockerList(p ?? {}));
 }

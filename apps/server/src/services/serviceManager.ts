@@ -229,6 +229,10 @@ export class ServiceManagerTag extends Context.Tag("home-server/ServiceManager")
       limit?: number;
     }) => Effect.Effect<ReadonlyArray<import("@home-server/contracts").SystemdUnitSummary>, ServiceSystemError>;
     readonly setEnabled: (id: string, enabled: boolean) => Effect.Effect<ServiceInstance, ServiceNotFoundError | ServiceSystemError>;
+    readonly dockerList: (opts?: {
+      query?: string;
+      limit?: number;
+    }) => Effect.Effect<ReadonlyArray<import("@home-server/contracts").DockerContainerSummary>, ServiceSystemError>;
   }
 >() {}
 
@@ -470,6 +474,9 @@ async function checkHttp(url: string, timeoutMs = 2000): Promise<boolean> {
 
 // ---------- ServiceManager ----------
 
+/** A service that stays up this long resets its consecutive-failure budget. */
+const RESTART_GRACE_MS = 60_000;
+
 interface RuntimeState {
   def: ServiceDefinition;
   status: ServiceStatus;
@@ -634,6 +641,7 @@ export class ServiceManager {
     id?: string;
     name: string;
     description?: string;
+    icon?: string;
     command: string;
     type?: ServiceDefinition["type"];
     systemdUnit?: string;
@@ -656,6 +664,7 @@ export class ServiceManager {
       id,
       name: input.name,
       description: input.description ?? "",
+      icon: input.icon,
       command: input.command,
       type: input.type ?? "shell",
       systemdUnit: input.systemdUnit,
@@ -734,26 +743,7 @@ export class ServiceManager {
       // hook exit for shell
       if (proc && typeof proc.on === "function") {
         const onClose = (code: number | null, signal: string | null) => {
-          if (rt.stopping) return; // intentional stop
-          rt.lastExitCode = code ?? null;
-          rt.proc = null;
-          rt.pid = null;
-          rt.status = "failed";
-          rt.lastError = `Exited with code ${code} signal ${signal}`;
-          this.emit({ type: "status", service: this.toInstance(rt) });
-          // auto-restart
-          if (def.autoRestart && rt.consecutiveFailures < (def.maxRestarts ?? 5)) {
-            rt.consecutiveFailures++;
-            rt.restartCount++;
-            const delay = def.restartDelayMs ?? 3000;
-            setTimeout(() => {
-              if (rt.stopping) return;
-              this.start(id).catch((e) => {
-                rt.lastError = (e as Error).message;
-                this.emit({ type: "error", serviceId: id, message: (e as Error).message });
-              });
-            }, delay);
-          }
+          this.handleUnexpectedExit(id, code, signal);
         };
         proc.on("close", onClose);
         proc.on("error", (err: Error) => {
@@ -764,6 +754,12 @@ export class ServiceManager {
         // pipe output events for shell
         proc.stdout?.on("data", (d: Buffer) => this.emit({ type: "output", serviceId: id, data: d.toString("utf8") }));
         proc.stderr?.on("data", (d: Buffer) => this.emit({ type: "output", serviceId: id, data: d.toString("utf8") }));
+        // fail-fast race: the process may already be gone before we attached
+        // (driver.start awaits log setup) — missed 'close' events would leave
+        // a zombie "running" state restarted forever by the monitor.
+        if (proc.exitCode !== null || proc.signalCode !== null) {
+          setImmediate(() => this.handleUnexpectedExit(id, proc.exitCode, proc.signalCode));
+        }
       } else {
         // for systemd/docker, we need to poll status; assume running
         rt.consecutiveFailures = 0;
@@ -822,6 +818,44 @@ export class ServiceManager {
     // small delay
     await new Promise((r) => setTimeout(r, 500));
     return this.start(id);
+  }
+
+  /**
+   * Shared unexpected-exit path (close event, missed close for fail-fast
+   * processes, monitor catch-up). Counts quick deaths against the restart
+   * budget so fail-fast loops settle on Failed; a service that stayed up
+   * past the grace period resets the counter.
+   */
+  private handleUnexpectedExit(id: string, code: number | null, signal: string | null): void {
+    const rt = this.runtimes.get(id);
+    if (!rt) return;
+    if (rt.stopping) return; // intentional stop
+    if (rt.status !== "running" && rt.status !== "starting" && rt.status !== "failed") return;
+    // already accounted for (e.g. close event + missed-exit check both firing)
+    if (rt.status === "failed" && rt.proc === null && rt.lastExitCode === (code ?? null)) return;
+    const def = rt.def;
+    rt.lastExitCode = code ?? null;
+    rt.proc = null;
+    rt.pid = null;
+    rt.status = "failed";
+    rt.lastError = `Exited with code ${code} signal ${signal}`;
+    this.emit({ type: "status", service: this.toInstance(rt) });
+    const uptimeMs = rt.startedAt ? Date.now() - new Date(rt.startedAt).getTime() : 0;
+    if (uptimeMs > RESTART_GRACE_MS) rt.consecutiveFailures = 0;
+    if (def.autoRestart && rt.consecutiveFailures < (def.maxRestarts ?? 5)) {
+      rt.consecutiveFailures++;
+      rt.restartCount++;
+      const delay = def.restartDelayMs ?? 3000;
+      setTimeout(() => {
+        const cur = this.runtimes.get(id);
+        if (!cur || cur.stopping) return;
+        if (cur.status !== "failed" && cur.status !== "error") return;
+        this.start(id).catch((e) => {
+          cur.lastError = (e as Error).message;
+          this.emit({ type: "error", serviceId: id, message: (e as Error).message });
+        });
+      }, delay);
+    }
   }
 
   async getStatus(id: string): Promise<ServiceInstance> {
@@ -1018,6 +1052,79 @@ export class ServiceManager {
     });
   }
 
+  /**
+   * List docker containers (`docker ps -a`), powering the "from a container"
+   * creation flow. Best-effort: empty list when docker is unavailable.
+   */
+  async dockerList(opts?: { query?: string; limit?: number }): Promise<
+    ReadonlyArray<import("@home-server/contracts").DockerContainerSummary>
+  > {
+    return Effect.runPromise(this.dockerListEffect(opts));
+  }
+
+  dockerListEffect(opts?: {
+    query?: string;
+    limit?: number;
+  }): Effect.Effect<
+    ReadonlyArray<import("@home-server/contracts").DockerContainerSummary>,
+    ServiceSystemError
+  > {
+    const query = opts?.query?.trim().toLowerCase() || "";
+    const limit = opts?.limit ?? 100;
+    return Effect.tryPromise({
+      try: async () => {
+        const managed = new Map<string, string>();
+        for (const rt of this.runtimes.values()) {
+          if (rt.def.type === "docker") {
+            managed.set(rt.def.dockerContainer ?? rt.def.id, rt.def.id);
+          }
+        }
+        let stdout = "";
+        try {
+          ({ stdout } = await defaultExec("docker", ["ps", "-a", "--format", "{{json .}}"]));
+        } catch {
+          return [];
+        }
+        let out: Array<{
+          name: string;
+          image: string;
+          state: string;
+          status: string;
+          running: boolean;
+          managedId: string | null;
+        }> = [];
+        for (const line of stdout.split("\n")) {
+          const t = line.trim();
+          if (!t) continue;
+          try {
+            const c = JSON.parse(t) as { Names?: string; Image?: string; State?: string; Status?: string };
+            const name = (c.Names ?? "").trim();
+            if (!name) continue;
+            out.push({
+              name,
+              image: (c.Image ?? "").trim(),
+              state: (c.State ?? "").trim(),
+              status: (c.Status ?? "").trim(),
+              running: (c.State ?? "").toLowerCase() === "running",
+              managedId: managed.get(name) ?? null,
+            });
+          } catch {
+            // skip unparseable lines
+          }
+        }
+        let filtered = out;
+        if (query) {
+          filtered = filtered.filter(
+            (c) => c.name.toLowerCase().includes(query) || c.image.toLowerCase().includes(query),
+          );
+        }
+        filtered.sort((a, b) => a.name.localeCompare(b.name));
+        return filtered.slice(0, limit);
+      },
+      catch: (cause) => new ServiceSystemError({ op: "dockerList", cause }),
+    });
+  }
+
   /** Enable/disable start-on-boot. systemd → `systemctl enable/disable`; else `enabled` flag. */
   async setEnabled(id: string, enabled: boolean): Promise<ServiceInstance> {
     const rt = this.runtimes.get(id);
@@ -1134,8 +1241,11 @@ export class ServiceManager {
         if (rt.def.type !== "shell") {
           this.getStatus(rt.def.id).catch(() => {});
         } else if (rt.def.autoRestart && (rt.status === "failed" || rt.status === "error") && !rt.stopping) {
-          // already handled via close handler, but also handle if we missed
+          // missed by the close handler (or it already gave up) — retry within
+          // budget so this backstop can't loop forever either.
           if (rt.consecutiveFailures < (rt.def.maxRestarts ?? 5)) {
+            rt.consecutiveFailures++;
+            rt.restartCount++;
             this.start(rt.def.id).catch(() => {});
           }
         }
@@ -1197,5 +1307,6 @@ export const ServiceManagerLive = (servicesPath: string, logsBase: string, opts?
       readLogs: (id, tailLines) => mgr.readLogsEffect(id, tailLines),
       discover: (dOpts) => mgr.discoverEffect(dOpts),
       setEnabled: (id, enabled) => mgr.setEnabledEffect(id, enabled),
+      dockerList: (dOpts) => mgr.dockerListEffect(dOpts),
     });
   });

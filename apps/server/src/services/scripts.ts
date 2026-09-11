@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -69,6 +70,17 @@ class ShellDriver implements ScriptDriver {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     if (def.env) Object.assign(env, def.env);
+    const runUser = def.runUser?.trim();
+    if (runUser && runUser !== os.userInfo().username) {
+      // run as another system user without a password prompt; fails visibly
+      // when sudoers isn't configured for it.
+      return spawn("sudo", ["-n", "-u", runUser, "--", "sh", "-c", def.command], {
+        cwd,
+        env,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    }
     return spawn(def.command, {
       cwd,
       env,
@@ -259,8 +271,11 @@ export class ScriptService {
       name: string;
       command: string;
       description?: string;
+      icon?: string;
       cwd?: string;
       env?: Record<string, string>;
+      runUser?: string;
+      runMode?: ScriptDefinition["runMode"];
       timeoutMs?: number;
       isService?: boolean;
       cron?: string;
@@ -281,9 +296,12 @@ export class ScriptService {
         id,
         name: input.name,
         description: input.description ?? "",
+        icon: input.icon ?? existing?.icon,
         command: input.command,
         cwd: input.cwd,
         env: input.env,
+        runUser: input.runUser ?? existing?.runUser,
+        runMode: input.runMode ?? existing?.runMode ?? "manual",
         timeoutMs: input.timeoutMs,
         isService: input.isService ?? false,
         cron: input.cron ?? existing?.cron,

@@ -3,6 +3,16 @@ import { z } from "zod";
 export const ScriptStatus = z.enum(["idle", "running", "success", "error", "killed"]);
 export type ScriptStatus = z.infer<typeof ScriptStatus>;
 
+export const ScriptSchedule = z.object({
+  /** backed by a systemd timer underneath; UI only exposes on/off + plain schedule */
+  enabled: z.boolean().optional().default(false),
+  /** systemd OnCalendar value, e.g. "daily", "hourly", "*:0/15" */
+  onCalendar: z.string().max(128).optional(),
+  /** run once on boot if a scheduled run was missed */
+  persistent: z.boolean().optional().default(false),
+});
+export type ScriptSchedule = z.infer<typeof ScriptSchedule>;
+
 export const ScriptDefinition = z.object({
   id: z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/),
   name: z.string().min(1).max(128),
@@ -13,7 +23,8 @@ export const ScriptDefinition = z.object({
   timeoutMs: z.number().int().min(1000).max(86_400_000).optional(), // default no timeout
   // service mode: keep running, restart on failure, monitor
   isService: z.boolean().optional().default(false),
-  cron: z.string().max(128).optional(), // e.g. "*/5 * * * *"
+  cron: z.string().max(128).optional(), // deprecated: use `schedule.onCalendar`
+  schedule: ScriptSchedule.optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -73,6 +84,7 @@ export const ScriptUpsertInput = z.object({
   timeoutMs: z.number().int().min(1000).max(86_400_000).optional(),
   isService: z.boolean().optional(),
   cron: z.string().max(128).optional(),
+  schedule: ScriptSchedule.optional(),
 });
 export type ScriptUpsertInput = z.infer<typeof ScriptUpsertInput>;
 
@@ -90,3 +102,22 @@ export const ScriptLogsInput = z.object({
   tailLines: z.number().int().min(1).max(5000).optional().default(200),
 });
 export type ScriptLogsInput = z.infer<typeof ScriptLogsInput>;
+
+// --- execution history (detail page: past runs + active run) ---
+
+export const ScriptWithStatus = ScriptDefinition.extend({
+  lastRun: ScriptRun.nullable().optional(),
+  activeRun: ScriptRun.nullable().optional(),
+});
+export type ScriptWithStatus = z.infer<typeof ScriptWithStatus>;
+
+export const ScriptRunsInput = z
+  .object({
+    scriptId: z.string().min(1).optional(),
+    limit: z.number().int().min(1).max(200).optional().default(50),
+  })
+  .optional();
+export type ScriptRunsInput = z.infer<typeof ScriptRunsInput>;
+
+export const ScriptGetRunInput = z.object({ runId: z.string().min(1) });
+export type ScriptGetRunInput = z.infer<typeof ScriptGetRunInput>;

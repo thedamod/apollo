@@ -481,6 +481,12 @@ interface RuntimeState {
   lastError: string | null;
   health: ServiceInstance["health"];
   logsPath: string | null;
+  // detail-page cache (refreshed by getStatus)
+  systemdEnabled: boolean | null;
+  systemdActiveState: string | null;
+  systemdSubState: string | null;
+  cpuPercent: number | null;
+  memoryBytes: number | null;
   // for backoff
   consecutiveFailures: number;
   stopping: boolean;
@@ -497,11 +503,17 @@ export class ServiceManager {
   constructor(
     private readonly servicesPath: string,
     private readonly logsBase: string,
+    opts?: { exec?: ExecFn; drivers?: ReadonlyArray<ServiceDriver> },
   ) {
     this.logsBase = path.join(logsBase, "services");
-    this.drivers.set("shell", new ShellDriver());
-    this.drivers.set("systemd", new SystemdDriver());
-    this.drivers.set("docker", new DockerDriver());
+    if (opts?.drivers) {
+      for (const d of opts.drivers) this.drivers.set(d.type, d);
+    } else {
+      const exec = opts?.exec ?? defaultExec;
+      this.drivers.set("shell", new ShellDriver());
+      this.drivers.set("systemd", new SystemdDriver(exec));
+      this.drivers.set("docker", new DockerDriver());
+    }
   }
 
   async init(): Promise<void> {
@@ -557,6 +569,11 @@ export class ServiceManager {
       lastError: null,
       health: null,
       logsPath,
+      systemdEnabled: null,
+      systemdActiveState: null,
+      systemdSubState: null,
+      cpuPercent: null,
+      memoryBytes: null,
       consecutiveFailures: 0,
       stopping: false,
     };
@@ -581,9 +598,12 @@ export class ServiceManager {
 
   private toInstance(rt: RuntimeState): ServiceInstance {
     const uptimeSeconds = rt.startedAt ? (Date.now() - new Date(rt.startedAt).getTime()) / 1000 : null;
+    // `error` is a legacy alias of `failed` — normalize on the wire so the
+    // client only has to render Running / Stopped / Failed.
+    const status = rt.status === "error" ? "failed" : rt.status;
     return {
       ...rt.def,
-      status: rt.status,
+      status,
       pid: rt.pid,
       uptimeSeconds: rt.status === "running" && uptimeSeconds !== null ? Math.max(0, uptimeSeconds) : null,
       restartCount: rt.restartCount,
@@ -592,6 +612,12 @@ export class ServiceManager {
       startedAt: rt.startedAt,
       health: rt.health,
       logsPath: rt.logsPath,
+      url: deriveServiceUrl(rt.def.port),
+      systemdEnabled: rt.systemdEnabled ?? null,
+      systemdActiveState: rt.systemdActiveState ?? null,
+      systemdSubState: rt.systemdSubState ?? null,
+      cpuPercent: rt.cpuPercent ?? null,
+      memoryBytes: rt.memoryBytes ?? null,
     };
   }
 
@@ -623,8 +649,8 @@ export class ServiceManager {
     enabled?: boolean;
   }): Promise<ServiceDefinition> {
     const id = input.id ?? `svc_${crypto.randomBytes(4).toString("hex")}`;
-    if (!/^[a-z0-9_-]+$/.test(id)) throw new Error(`Invalid service id: ${id}`);
-    if (this.defs.has(id)) throw Object.assign(new Error(`Service already exists: ${id}`), { code: "already_exists" });
+    if (!/^[a-z0-9_-]+$/.test(id)) throw new ServiceRpcError("invalid_id", `Invalid service id: ${id}`);
+    if (this.defs.has(id)) throw new ServiceRpcError("already_exists", `Service already exists: ${id}`);
     const now = new Date().toISOString();
     const def: ServiceDefinition = {
       id,
@@ -656,7 +682,7 @@ export class ServiceManager {
 
   async update(id: string, patch: Partial<Omit<ServiceDefinition, "id" | "createdAt" | "updatedAt">>): Promise<ServiceDefinition> {
     const existing = this.defs.get(id);
-    if (!existing) throw Object.assign(new Error(`Unknown service: ${id}`), { code: "not_found" });
+    if (!existing) throw new ServiceRpcError("not_found", `Unknown service: ${id}`);
     const now = new Date().toISOString();
     const updated: ServiceDefinition = {
       ...existing,
@@ -675,7 +701,7 @@ export class ServiceManager {
 
   async delete(id: string): Promise<void> {
     const rt = this.runtimes.get(id);
-    if (!rt) throw Object.assign(new Error(`Unknown service: ${id}`), { code: "not_found" });
+    if (!rt) throw new ServiceRpcError("not_found", `Unknown service: ${id}`);
     // stop if running
     if (rt.status === "running" || rt.status === "starting") {
       await this.stop(id).catch(() => {});
@@ -687,11 +713,11 @@ export class ServiceManager {
 
   async start(id: string): Promise<ServiceInstance> {
     const rt = this.runtimes.get(id);
-    if (!rt) throw Object.assign(new Error(`Unknown service: ${id}`), { code: "not_found" });
+    if (!rt) throw new ServiceRpcError("not_found", `Unknown service: ${id}`);
     if (rt.status === "running" || rt.status === "starting") return this.toInstance(rt);
     const def = rt.def;
     const driver = this.drivers.get(def.type);
-    if (!driver) throw new Error(`Unknown driver: ${def.type}`);
+    if (!driver) throw new ServiceRpcError("unknown", `Unknown driver: ${def.type}`);
 
     rt.status = "starting";
     rt.lastError = null;
@@ -712,7 +738,7 @@ export class ServiceManager {
           rt.lastExitCode = code ?? null;
           rt.proc = null;
           rt.pid = null;
-          rt.status = "error";
+          rt.status = "failed";
           rt.lastError = `Exited with code ${code} signal ${signal}`;
           this.emit({ type: "status", service: this.toInstance(rt) });
           // auto-restart
@@ -732,7 +758,7 @@ export class ServiceManager {
         proc.on("close", onClose);
         proc.on("error", (err: Error) => {
           rt.lastError = (err as Error).message;
-          rt.status = "error";
+          rt.status = "failed";
           this.emit({ type: "error", serviceId: id, message: (err as Error).message });
         });
         // pipe output events for shell
@@ -747,7 +773,7 @@ export class ServiceManager {
       this.emit({ type: "status", service: this.toInstance(rt) });
       return this.toInstance(rt);
     } catch (e: unknown) {
-      rt.status = "error";
+      rt.status = "failed";
       rt.lastError = (e as Error).message;
       this.emit({ type: "error", serviceId: id, message: (e as Error).message });
       throw e;
@@ -756,7 +782,7 @@ export class ServiceManager {
 
   async stop(id: string, signal = "SIGTERM"): Promise<ServiceInstance> {
     const rt = this.runtimes.get(id);
-    if (!rt) throw Object.assign(new Error(`Unknown service: ${id}`), { code: "not_found" });
+    if (!rt) throw new ServiceRpcError("not_found", `Unknown service: ${id}`);
     if (rt.status === "stopped") return this.toInstance(rt);
     rt.stopping = true;
     rt.status = "stopping";
@@ -800,7 +826,7 @@ export class ServiceManager {
 
   async getStatus(id: string): Promise<ServiceInstance> {
     const rt = this.runtimes.get(id);
-    if (!rt) throw Object.assign(new Error(`Unknown service: ${id}`), { code: "not_found" });
+    if (!rt) throw new ServiceRpcError("not_found", `Unknown service: ${id}`);
     // refresh status from driver (for systemd/docker)
     if (rt.def.type !== "shell") {
       const driver = this.drivers.get(rt.def.type);
@@ -810,6 +836,16 @@ export class ServiceManager {
         rt.pid = pid;
         if (running && !rt.startedAt) rt.startedAt = new Date().toISOString();
         if (!running) rt.startedAt = null;
+        if (rt.def.type === "systemd") {
+          const [state, mem] = await Promise.all([
+            driver.activeState?.(rt.def).catch(() => ({ active: null, sub: null })) ?? { active: null, sub: null },
+            procStatsForPid(pid).catch(() => ({ cpuPercent: null, memoryBytes: null })),
+          ]);
+          rt.systemdActiveState = state.active ?? null;
+          rt.systemdSubState = state.sub ?? null;
+          rt.systemdEnabled = (await driver.isEnabled?.(rt.def).catch(() => null)) ?? rt.systemdEnabled ?? null;
+          rt.memoryBytes = mem.memoryBytes ?? rt.memoryBytes ?? null;
+        }
       }
     } else if (rt.proc) {
       // for shell, verify still running
@@ -818,17 +854,21 @@ export class ServiceManager {
       if (!running) {
         // was considered running but died without close event
         if (!rt.stopping) {
-          rt.status = "error";
+          rt.status = "failed";
           rt.lastError = "Process died unexpectedly";
           rt.proc = null;
           rt.pid = null;
         }
       } else {
         rt.pid = pid;
+        const mem = await procStatsForPid(pid).catch(() => ({ cpuPercent: null, memoryBytes: null }));
+        rt.memoryBytes = mem.memoryBytes ?? rt.memoryBytes ?? null;
       }
     }
     await this.runHealthCheck(rt);
-    return this.toInstance(rt);
+    const inst = this.toInstance(rt);
+    this.emit({ type: "status", service: inst });
+    return inst;
   }
 
   private async runHealthCheck(rt: RuntimeState): Promise<void> {
@@ -865,7 +905,7 @@ export class ServiceManager {
 
   async readLogs(id: string, tailLines = 200): Promise<string> {
     const rt = this.runtimes.get(id);
-    if (!rt) throw Object.assign(new Error(`Unknown service: ${id}`), { code: "not_found" });
+    if (!rt) throw new ServiceRpcError("not_found", `Unknown service: ${id}`);
     if (rt.def.type !== "shell") {
       const driver = this.drivers.get(rt.def.type);
       if (driver) return driver.logs(rt.def, tailLines);
@@ -882,6 +922,208 @@ export class ServiceManager {
     }
   }
 
+  /**
+   * List systemd units, hiding system plumbing by default.
+   * Powers the Services list "add from system" flow — user-facing only
+   * (Jellyfin, Docker, Samba-class) unless `userFacingOnly: false`.
+   */
+  async discover(opts?: { userFacingOnly?: boolean; query?: string; limit?: number }): Promise<
+    ReadonlyArray<import("@home-server/contracts").SystemdUnitSummary>
+  > {
+    return Effect.runPromise(this.discoverEffect(opts));
+  }
+
+  discoverEffect(opts?: {
+    userFacingOnly?: boolean;
+    query?: string;
+    limit?: number;
+  }): Effect.Effect<
+    ReadonlyArray<import("@home-server/contracts").SystemdUnitSummary>,
+    ServiceSystemError
+  > {
+    const userFacingOnly = opts?.userFacingOnly ?? true;
+    const query = opts?.query?.trim().toLowerCase() || "";
+    const limit = opts?.limit ?? 100;
+    return Effect.tryPromise({
+      try: async () => {
+        const exec = defaultExec;
+        let stdout = "";
+        try {
+          ({ stdout } = await exec("systemctl", [
+            "list-units",
+            "--type=service",
+            "--all",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+          ]));
+        } catch (e: unknown) {
+          throw new ServiceSystemError({ op: "systemctl list-units", cause: e });
+        }
+        const managedUnits = new Map<string, string>();
+        for (const rt of this.runtimes.values()) {
+          if (rt.def.type === "systemd") {
+            managedUnits.set(rt.def.systemdUnit ?? `${rt.def.id}.service`, rt.def.id);
+          }
+        }
+        // descriptions come from `systemctl list-units` 4th+ column; enabled
+        // state is resolved lazily per unit only for candidates (bounded)
+        const rows: Array<{ unit: string; description: string; load: string; active: string; sub: string }> = [];
+        for (const line of stdout.split("\n")) {
+          const t = line.trim();
+          if (!t) continue;
+          const parts = t.split(/\s+/);
+          const unit = parts[0];
+          if (!unit || !unit.endsWith(".service")) continue;
+          const load = parts[1] ?? "";
+          const active = parts[2] ?? "";
+          const sub = parts[3] ?? "";
+          const description = parts.slice(4).join(" ");
+          rows.push({ unit, description, load, active, sub });
+        }
+        let out = rows.map((r) => ({
+          unit: r.unit,
+          description: r.description,
+          loadState: r.load,
+          activeState: r.active,
+          subState: r.sub,
+          enabled: null as boolean | null,
+          userFacing: isUserFacingUnit(r.unit, r.description),
+          managedId: managedUnits.get(r.unit) ?? null,
+        }));
+        if (userFacingOnly) out = out.filter((u) => u.userFacing);
+        if (query) {
+          out = out.filter(
+            (u) => u.unit.toLowerCase().includes(query) || u.description.toLowerCase().includes(query),
+          );
+        }
+        out.sort((a, b) => a.unit.localeCompare(b.unit));
+        const sliced = out.slice(0, limit);
+        // resolve is-enabled for the visible slice only (bounded systemctl calls)
+        await Promise.all(
+          sliced.map(async (u) => {
+            try {
+              const { stdout: en } = await exec("systemctl", ["is-enabled", u.unit]);
+              const v = en.trim();
+              u.enabled = v === "enabled" || v === "enabled-runtime" || v === "static";
+            } catch {
+              u.enabled = null;
+            }
+          }),
+        );
+        return sliced;
+      },
+      catch: (cause) =>
+        cause instanceof ServiceSystemError ? cause : new ServiceSystemError({ op: "discover", cause }),
+    });
+  }
+
+  /** Enable/disable start-on-boot. systemd → `systemctl enable/disable`; else `enabled` flag. */
+  async setEnabled(id: string, enabled: boolean): Promise<ServiceInstance> {
+    const rt = this.runtimes.get(id);
+    if (!rt) throw new ServiceRpcError("not_found", `Unknown service: ${id}`);
+    if (rt.def.type === "systemd") {
+      const driver = this.drivers.get("systemd");
+      try {
+        await driver?.setEnabled?.(rt.def, enabled);
+        rt.systemdEnabled = enabled;
+      } catch (e: unknown) {
+        throw new ServiceRpcError("unknown", `systemctl ${enabled ? "enable" : "disable"} failed: ${(e as Error).message}`);
+      }
+    }
+    const updated = await this.update(id, { enabled });
+    void updated;
+    const inst = await this.getStatus(id).catch(() => this.toInstance(rt));
+    this.emit({ type: "status", service: inst });
+    return inst;
+  }
+
+  // ---- Effect-native adapters (same structure as terminal/filesystem) ----
+
+  listEffect(): Effect.Effect<ReadonlyArray<ServiceInstance>> {
+    return Effect.succeed(this.list());
+  }
+
+  getEffect(id: string): Effect.Effect<ServiceInstance, ServiceNotFoundError> {
+    const s = this.get(id);
+    return s ? Effect.succeed(s) : Effect.fail(new ServiceNotFoundError({ id }));
+  }
+
+  getStatusEffect(id: string): Effect.Effect<ServiceInstance, ServiceNotFoundError | ServiceSystemError> {
+    return Effect.tryPromise({
+      try: () => this.getStatus(id),
+      catch: (cause) =>
+        cause instanceof ServiceRpcError && cause.code === "not_found"
+          ? new ServiceNotFoundError({ id })
+          : new ServiceSystemError({ id, op: "getStatus", cause }),
+    });
+  }
+
+  createEffect(
+    input: Parameters<ServiceManager["create"]>[0],
+  ): Effect.Effect<ServiceDefinition, ServiceAlreadyExistsError | ServiceInvalidIdError> {
+    return Effect.tryPromise({
+      try: () => this.create(input),
+      catch: (cause) => {
+        const code = (cause as ServiceRpcError)?.code;
+        const id = String((input as { id?: string }).id ?? "");
+        if (code === "already_exists") return new ServiceAlreadyExistsError({ id });
+        return new ServiceInvalidIdError({ id }) as unknown as ServiceAlreadyExistsError;
+      },
+    });
+  }
+
+  startEffect(id: string): Effect.Effect<ServiceInstance, ServiceNotFoundError | ServiceDriverError> {
+    return Effect.tryPromise({
+      try: () => this.start(id),
+      catch: (cause) =>
+        (cause as ServiceRpcError)?.code === "not_found"
+          ? new ServiceNotFoundError({ id })
+          : new ServiceDriverError({ id, driver: this.runtimes.get(id)?.def.type ?? "unknown", cause }),
+    });
+  }
+
+  stopEffect(id: string, signal?: string): Effect.Effect<ServiceInstance, ServiceNotFoundError> {
+    return Effect.tryPromise({
+      try: () => this.stop(id, signal),
+      catch: () => new ServiceNotFoundError({ id }),
+    });
+  }
+
+  restartEffect(id: string): Effect.Effect<ServiceInstance, ServiceNotFoundError | ServiceDriverError> {
+    return Effect.tryPromise({
+      try: () => this.restart(id),
+      catch: (cause) =>
+        (cause as ServiceRpcError)?.code === "not_found"
+          ? new ServiceNotFoundError({ id })
+          : new ServiceDriverError({ id, driver: this.runtimes.get(id)?.def.type ?? "unknown", cause }),
+    });
+  }
+
+  readLogsEffect(id: string, tailLines = 200): Effect.Effect<string, ServiceNotFoundError> {
+    return Effect.tryPromise({
+      try: () => this.readLogs(id, tailLines),
+      catch: () => new ServiceNotFoundError({ id }),
+    });
+  }
+
+  setEnabledEffect(
+    id: string,
+    enabled: boolean,
+  ): Effect.Effect<ServiceInstance, ServiceNotFoundError | ServiceSystemError> {
+    return Effect.tryPromise({
+      try: () => this.setEnabled(id, enabled),
+      catch: (cause) =>
+        (cause as ServiceRpcError)?.code === "not_found"
+          ? new ServiceNotFoundError({ id })
+          : new ServiceSystemError({ id, op: "setEnabled", cause }),
+    });
+  }
+
+  onEventEffect(listener: (ev: ServiceEvent) => void): Effect.Effect<() => void> {
+    return Effect.sync(() => this.onEvent(listener));
+  }
+
   private startMonitors(): void {
     if (this.monitorTimer) clearInterval(this.monitorTimer);
     if (this.healthTimer) clearInterval(this.healthTimer);
@@ -891,7 +1133,7 @@ export class ServiceManager {
         // refresh external
         if (rt.def.type !== "shell") {
           this.getStatus(rt.def.id).catch(() => {});
-        } else if (rt.def.autoRestart && rt.status === "error" && !rt.stopping) {
+        } else if (rt.def.autoRestart && (rt.status === "failed" || rt.status === "error") && !rt.stopping) {
           // already handled via close handler, but also handle if we missed
           if (rt.consecutiveFailures < (rt.def.maxRestarts ?? 5)) {
             this.start(rt.def.id).catch(() => {});
@@ -923,4 +1165,37 @@ export class ServiceManager {
   registerDriver(driver: ServiceDriver): void {
     this.drivers.set(driver.type, driver);
   }
+
+  shutdownEffect(): Effect.Effect<void> {
+    return Effect.sync(() => {
+      if (this.monitorTimer) clearInterval(this.monitorTimer);
+      if (this.healthTimer) clearInterval(this.healthTimer);
+    });
+  }
 }
+
+/** Effect Layer — same structure as FilesystemServiceLive / TerminalManagerLive. */
+export const ServiceManagerLive = (servicesPath: string, logsBase: string, opts?: { exec?: ExecFn }) =>
+  Layer.sync(ServiceManagerTag, () => {
+    const mgr = new ServiceManager(servicesPath, logsBase, opts);
+    return ServiceManagerTag.of({
+      list: () => mgr.listEffect(),
+      get: (id) => mgr.getEffect(id),
+      getStatus: (id) => mgr.getStatusEffect(id),
+      create: (input) => mgr.createEffect(input),
+      update: (id, patch) => Effect.tryPromise({
+        try: () => mgr.update(id, patch),
+        catch: () => new ServiceNotFoundError({ id }),
+      }),
+      delete: (id) => Effect.tryPromise({
+        try: () => mgr.delete(id),
+        catch: () => new ServiceNotFoundError({ id }),
+      }),
+      start: (id) => mgr.startEffect(id),
+      stop: (id, signal) => mgr.stopEffect(id, signal),
+      restart: (id) => mgr.restartEffect(id),
+      readLogs: (id, tailLines) => mgr.readLogsEffect(id, tailLines),
+      discover: (dOpts) => mgr.discoverEffect(dOpts),
+      setEnabled: (id, enabled) => mgr.setEnabledEffect(id, enabled),
+    });
+  });

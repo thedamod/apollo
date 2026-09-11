@@ -13,6 +13,14 @@ export const ScriptSchedule = z.object({
 });
 export type ScriptSchedule = z.infer<typeof ScriptSchedule>;
 
+/** Input variant — no defaults applied, all fields optional for PATCH-style upserts. */
+export const ScriptScheduleInput = z.object({
+  enabled: z.boolean().optional(),
+  onCalendar: z.string().max(128).optional(),
+  persistent: z.boolean().optional(),
+});
+export type ScriptScheduleInput = z.infer<typeof ScriptScheduleInput>;
+
 export const ScriptDefinition = z.object({
   id: z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/),
   name: z.string().min(1).max(128),
@@ -84,7 +92,7 @@ export const ScriptUpsertInput = z.object({
   timeoutMs: z.number().int().min(1000).max(86_400_000).optional(),
   isService: z.boolean().optional(),
   cron: z.string().max(128).optional(),
-  schedule: ScriptSchedule.optional(),
+  schedule: ScriptScheduleInput.optional(),
 });
 export type ScriptUpsertInput = z.infer<typeof ScriptUpsertInput>;
 

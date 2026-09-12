@@ -7,8 +7,13 @@
  *  - request/response: `{ id, method, params }` -> `{ id, result|error }`
  *  - subscriptions: `system.statsSubscribe`, `services.subscribe`,
  *    `scripts.subscribe` then `{ type:"event", channel, payload }` frames
- *  - pairing: `GET <baseUrl>/pair?token=pair_...` -> `{ token }`
- *    (server `apps/server/src/http.ts` + `bin.ts pair`)
+ *  - pairing: `GET <baseUrl>/pair?token=<12-char-code>` -> `{ token }`
+ *    (server `apps/server/src/http.ts` + `bin.ts pair`).
+ *    Pairing URL is `http://<host>:<port>/pair#token=<code>` (t3code hash style,
+ *    small 12-char alphabet 23456789ABCDEFGHJKLMNPQRSTUVWXYZ). The client
+ *    extracts token from hash or query and fetches via ?token=.
+ *  - connection string: `http://<host>:<port>` (t3code resolveHeadlessConnectionString:
+ *    wildcard 0.0.0.0 resolves to LAN IP, else localhost) — small, memorable.
  *  - tailscale: server runs `tailscale serve --bg --https=443
  *    http://127.0.0.1:<port>` when started with `--tailscale`
  *    (see `@home-server/tailscale`). The app just connects to whatever
@@ -130,11 +135,42 @@ export function parseServerUrl(raw: string): ParsedServerUrl {
   };
 }
 
+export function getPairingTokenFromUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw.trim());
+    const hashToken = new URLSearchParams(u.hash.startsWith("#") ? u.hash.slice(1) : u.hash).get("token")?.trim();
+    if (hashToken) return hashToken;
+    const q = u.searchParams.get("token")?.trim();
+    return q && q.length > 0 ? q : null;
+  } catch {
+    return null;
+  }
+}
+
+function pairingBaseUrlFromPairingUrl(raw: string): string {
+  const u = new URL(raw.trim());
+  // Strip token from both hash and query, and normalize to http(s) base
+  u.hash = "";
+  u.searchParams.delete("token");
+  // pairingUrl is like http://host:port/pair#token=... -> base is http://host:port
+  // hosted links (t3code style app.t3.codes/pair?host=...#token=...) not used, but handle host param
+  const hostedHost = u.searchParams.get("host");
+  if (hostedHost) {
+    try {
+      const h = new URL(hostedHost.startsWith("http") ? hostedHost : `https://${hostedHost}`);
+      return `${h.protocol}//${h.host}`;
+    } catch {}
+  }
+  return `${u.protocol}//${u.host}`;
+}
+
 /** Exchange a pairing URL (from `home-server pair` / server startup log) for a token. */
 export async function redeemPairingUrl(pairingUrl: string, label?: string): Promise<ServerEntry> {
-  const u = new URL(pairingUrl.trim());
-  const baseUrl = `${u.protocol}//${u.host}`;
-  const res = await fetch(pairingUrl.trim(), { method: "GET" });
+  const token = getPairingTokenFromUrl(pairingUrl);
+  if (!token) throw classifiedError("blocked", "Pairing URL is missing its token — copy the full Pairing URL");
+  const baseUrl = pairingBaseUrlFromPairingUrl(pairingUrl);
+  // Token is in hash fragment (t3code style: /pair#token=...), but fetch doesn't send hash — send as ?token=
+  const res = await fetch(`${baseUrl}/pair?token=${encodeURIComponent(token)}`, { method: "GET" });
   if (res.status === 401) throw classifiedError("blocked", "Pairing token expired — mint a fresh one with `home-server pair`");
   if (!res.ok) throw classifiedError("transient", `Pairing failed (HTTP ${res.status})`);
   const body = (await res.json()) as { token?: string };

@@ -6,7 +6,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { mimeHintFromExt, extOf } from "@home-server/shared/path";
 import { resolveUserPath } from "./services/filesystem.ts";
-import { verifyToken, createPairingToken, consumePairingToken, pairingUrlFromConfig } from "./auth.ts";
+import { verifyToken, createPairingToken, consumePairingToken, getPairingTokenFromUrl, pairingUrlFromConfig } from "./auth.ts";
 import type { ServerConfig } from "./config.ts";
 import { logger } from "./logger.ts";
 import type { SystemService } from "./services/system.ts";
@@ -30,9 +30,22 @@ export function createHttpApp(opts: {
   // well-known for tailscale probe
   app.get("/.well-known/home-server", (_req, res) => res.json({ ok: true, name: "home-server" }));
 
-  // pairing flow (like t3code pair)
+  // pairing flow (like t3code pair — token in hash #token=..., client extracts and sends as ?token=)
   app.get("/pair", (req, res) => {
-    const token = req.query.token as string | undefined;
+    // Accept token from query (?token=), hash-derived query, or X-Pairing-Token header.
+    // Also parse full URL hash if client sent pairing URL as redirect.
+    let token = (req.query.token as string | undefined)?.trim();
+    if (!token) {
+      const raw = req.headers["x-pairing-token"] as string | undefined;
+      if (raw?.trim()) token = raw.trim();
+    }
+    if (!token) {
+      // fallback: try to extract from Referer or raw url hash (if client did fetch(pairingUrl) the hash is stripped, so we handle both)
+      try {
+        const full = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
+        token = getPairingTokenFromUrl(new URL(full)) ?? undefined;
+      } catch {}
+    }
     if (!token || !consumePairingToken(token)) {
       return res.status(401).json({ error: "invalid or expired pairing token" });
     }

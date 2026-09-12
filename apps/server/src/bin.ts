@@ -3,7 +3,7 @@ import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadOrCreateConfig } from "./config.ts";
-import { ensureToken, createPairingToken, pairingUrlFromConfig } from "./auth.ts";
+import { ensureToken, createPairingToken, pairingUrlFromConfig, resolveHeadlessConnectionString, buildPairingUrl } from "./auth.ts";
 import { logger } from "./logger.ts";
 import { createHttpApp } from "./http.ts";
 import { attachWsRouter } from "./ws.ts";
@@ -79,7 +79,10 @@ async function main(): Promise<void> {
     const cfg = loadOrCreateConfig({ baseDir, port: opts.port ? Number(opts.port) : undefined });
     ensureToken(cfg.tokenPath);
     const pairing = createPairingToken();
-    const url = pairingUrlFromConfig(cfg.port, cfg.host, pairing);
+    const connectionString = resolveHeadlessConnectionString(cfg.host, cfg.port);
+    const url = buildPairingUrl(connectionString, pairing);
+    console.log(`Connection string: ${connectionString}`);
+    console.log(`Pairing URL: ${url}`);
     console.log(url);
     return;
   }
@@ -156,12 +159,13 @@ async function main(): Promise<void> {
       writeRuntimeState(actualPort);
       logger.info(`home-server listening`, { host: config.host, port: actualPort });
       const pairing = createPairingToken();
-      const pairingUrl = pairingUrlFromConfig(actualPort, config.host, pairing);
-      console.log(`\n  home-server ready on http://${config.host}:${actualPort}`);
-      console.log(`  pairingUrl: ${pairingUrl}`);
+      const connectionString = resolveHeadlessConnectionString(config.host, actualPort);
+      const pairingUrl = buildPairingUrl(connectionString, pairing);
+      console.log(`\n  home-server ready`);
+      console.log(`  Connection string: ${connectionString}`);
+      console.log(`  Pairing URL: ${pairingUrl}`);
       console.log(`  token: ${token.slice(0, 8)}... (use 'home-server token' to print full)`);
-      console.log(`  ws: ws://${config.host}:${actualPort}/ws?token=<token>`);
-      console.log(`  health: http://${config.host}:${actualPort}/health\n`);
+      console.log(`  health: ${connectionString}/health\n`);
 
       // tailscale serve (like t3code:300:apps/server/src/server.ts:559)
       if (config.tailscaleServeEnabled) {

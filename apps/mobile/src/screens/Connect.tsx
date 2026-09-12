@@ -16,7 +16,7 @@ import { Card } from "../components/Card";
  *
  * Accepts either:
  *  - a pairing URL printed by `home-server pair` / server startup
- *    (`http://<host>:<port>/pair?token=pair_...`), or
+ *    (`http://<host>:<port>/pair#token=...` — 12-char code, t3code style), or
  *  - a manual base URL + long-lived token (`home-server token`).
  *
  * Works over LAN, Tailscale 100.x IPs, and MagicDNS (`*.ts.net`) —
@@ -140,7 +140,7 @@ export function ConnectScreen({
           />
           <TextInput
             style={styles.input}
-            placeholder="http://100.x.y.z:7070/pair?token=pair_…"
+            placeholder="http://192.168.1.10:7070/pair#token=…"
             placeholderTextColor={theme.colors.muted}
             value={pairingUrl}
             onChangeText={setPairingUrl}

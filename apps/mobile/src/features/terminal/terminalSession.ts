@@ -7,6 +7,7 @@
  */
 import type {
   TerminalAttachStreamEvent,
+  TerminalMetadataStreamEvent,
   TerminalRuntimeStatus,
   TerminalSessionSnapshot,
   TerminalSummary,
@@ -24,6 +25,18 @@ export interface TerminalSessionState {
   readonly version: number;
 }
 
+/** Attach-stream event plus a defensive `started` variant (the server converts
+ * `started` to `snapshot`, but a stray frame must never produce `undefined`). */
+export type AnyTerminalAttachEvent =
+  | TerminalAttachStreamEvent
+  | {
+      readonly type: "started";
+      readonly sessionId: string;
+      readonly terminalId: string;
+      readonly sequence?: number;
+      readonly snapshot: TerminalSessionSnapshot;
+    };
+
 export interface TerminalBufferState {
   readonly buffer: string;
   readonly status: TerminalRuntimeStatus;
@@ -40,15 +53,17 @@ export const EMPTY_TERMINAL_BUFFER_STATE = Object.freeze<TerminalBufferState>({
   version: 0,
 });
 
-export const EMPTY_TERMINAL_SESSION_STATE = Object.freeze<TerminalSessionState>({
-  summary: null,
-  buffer: "",
-  status: "closed",
-  error: null,
-  hasRunningSubprocess: false,
-  updatedAt: null,
-  version: 0,
-});
+export const EMPTY_TERMINAL_SESSION_STATE = Object.freeze<TerminalSessionState>(
+  {
+    summary: null,
+    buffer: "",
+    status: "closed",
+    error: null,
+    hasRunningSubprocess: false,
+    updatedAt: null,
+    version: 0,
+  },
+);
 
 export const DEFAULT_MAX_TERMINAL_BUFFER_BYTES = 512 * 1024;
 const textEncoder = new TextEncoder();
@@ -89,7 +104,10 @@ export function terminalBufferStateFromSnapshot(
   };
 }
 
-function latestTimestamp(left: string | null, right: string | null): string | null {
+function latestTimestamp(
+  left: string | null,
+  right: string | null,
+): string | null {
   if (left === null) return right;
   if (right === null) return left;
   return Date.parse(left) >= Date.parse(right) ? left : right;
@@ -102,7 +120,8 @@ export function combineTerminalSessionState(
   return {
     summary,
     buffer: buffer.buffer,
-    status: buffer.version > 0 ? buffer.status : (summary?.status ?? buffer.status),
+    status:
+      buffer.version > 0 ? buffer.status : (summary?.status ?? buffer.status),
     error: buffer.error,
     hasRunningSubprocess: summary?.hasRunningSubprocess ?? false,
     updatedAt: latestTimestamp(summary?.updatedAt ?? null, buffer.updatedAt),
@@ -112,17 +131,21 @@ export function combineTerminalSessionState(
 
 export function applyTerminalAttachStreamEvent(
   current: TerminalBufferState,
-  event: TerminalAttachStreamEvent,
+  event: AnyTerminalAttachEvent,
   maxBufferBytes = DEFAULT_MAX_TERMINAL_BUFFER_BYTES,
 ): TerminalBufferState {
   switch (event.type) {
     case "snapshot":
     case "restarted":
+    case "started":
       return terminalBufferStateFromSnapshot(event.snapshot, maxBufferBytes);
     case "output":
       return {
         ...current,
-        buffer: trimBufferToBytes(`${current.buffer}${event.data}`, maxBufferBytes),
+        buffer: trimBufferToBytes(
+          `${current.buffer}${event.data}`,
+          maxBufferBytes,
+        ),
         status: current.status === "closed" ? "running" : current.status,
         error: null,
         version: current.version + 1,
@@ -162,21 +185,46 @@ export function applyTerminalAttachStreamEvent(
 
 export function applyTerminalSummaryEvent(
   current: ReadonlyArray<TerminalSummary>,
-  event: { type: string; terminal?: TerminalSummary; sessionId?: string; terminalId?: string },
+  event:
+    | TerminalMetadataStreamEvent
+    | {
+        type: string;
+        terminal?: TerminalSummary;
+        terminals?: TerminalSummary[];
+        sessionId?: string;
+        terminalId?: string;
+      },
 ): ReadonlyArray<TerminalSummary> {
-  if (event.type === "snapshot" && Array.isArray((event as unknown as { terminals?: unknown }).terminals)) {
-    return (event as unknown as { terminals: TerminalSummary[] }).terminals;
+  const e = event as {
+    type: string;
+    terminal?: TerminalSummary;
+    terminals?: unknown;
+    sessionId?: string;
+    terminalId?: string;
+  };
+  if (e.type === "snapshot" && Array.isArray(e.terminals)) {
+    return e.terminals as TerminalSummary[];
   }
-  if (event.type === "remove" || event.type === "closed") {
+  if (e.type === "remove" || e.type === "closed") {
     return current.filter(
-      (t) => t.sessionId !== event.sessionId || t.terminalId !== event.terminalId,
+      (t) => t.sessionId !== e.sessionId || t.terminalId !== e.terminalId,
     );
   }
-  if (event.terminal) {
+  if (e.terminal) {
     const next = current.filter(
-      (t) => t.sessionId !== event.terminal!.sessionId || t.terminalId !== event.terminal!.terminalId,
+      (t) =>
+        t.sessionId !== e.terminal!.sessionId ||
+        t.terminalId !== e.terminal!.terminalId,
     );
-    return [...next, event.terminal];
+    return [...next, e.terminal];
   }
   return current;
 }
+
+/**
+ * t3code name for {@link applyTerminalSummaryEvent} (`applyTerminalMetadataStreamEvent`
+ * in `packages/client-runtime/src/state/terminalSession.ts`). Kept as an alias
+ * for parity; behavior is identical (plus a defensive `closed` case, since a
+ * stray close frame must still drop the summary).
+ */
+export const applyTerminalMetadataStreamEvent = applyTerminalSummaryEvent;

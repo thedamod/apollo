@@ -2,7 +2,10 @@
  * Terminal menu helpers — ported 1:1 from t3code
  * `apps/mobile/src/features/terminal/terminalMenu.ts` (Effect-free).
  */
-import { DEFAULT_TERMINAL_ID, type TerminalSummary } from "../../lib/terminalProtocol";
+import {
+  DEFAULT_TERMINAL_ID,
+  type TerminalSummary,
+} from "../../lib/terminalProtocol";
 import {
   getTerminalLabel,
   nextTerminalId,
@@ -28,7 +31,9 @@ function compareTerminalIds(left: string, right: string): number {
 function sortMenuSessions(
   sessions: ReadonlyArray<TerminalMenuSession>,
 ): TerminalMenuSession[] {
-  return [...sessions].sort((a, b) => compareTerminalIds(a.terminalId, b.terminalId));
+  return [...sessions].sort((a, b) =>
+    compareTerminalIds(a.terminalId, b.terminalId),
+  );
 }
 
 export function basename(input: string | null): string | null {
@@ -75,7 +80,9 @@ export function nextOpenTerminalId(input: {
   readonly activeRouteTerminalId?: string | null;
 }): string {
   const listed = input.listedTerminalIds.filter((id) => id.trim().length > 0);
-  const routeId = input.activeRouteTerminalId?.trim() ? input.activeRouteTerminalId : null;
+  const routeId = input.activeRouteTerminalId?.trim()
+    ? input.activeRouteTerminalId
+    : null;
 
   if (!routeId || listed.includes(routeId)) {
     return nextTerminalId(listed);
@@ -113,12 +120,18 @@ export function buildTerminalMenuSessions(input: {
       cwd: session.summary?.cwd ?? input.workspaceRoot,
       status: session.status,
       hasRunningSubprocess: session.hasRunningSubprocess,
-      displayLabel: resolveTerminalSessionLabel(session.terminalId, session.summary),
+      displayLabel: resolveTerminalSessionLabel(
+        session.terminalId,
+        session.summary,
+      ),
       updatedAt: session.updatedAt,
     });
   }
 
-  if (input.currentSession && !sessionsById.has(input.currentSession.terminalId)) {
+  if (
+    input.currentSession &&
+    !sessionsById.has(input.currentSession.terminalId)
+  ) {
     sessionsById.set(input.currentSession.terminalId, input.currentSession);
   }
 
@@ -145,7 +158,10 @@ export function previousLiveTerminalId(input: {
     return null;
   }
 
-  const below = live.filter((session) => compareTerminalIds(session.terminalId, input.exitedTerminalId) < 0);
+  const below = live.filter(
+    (session) =>
+      compareTerminalIds(session.terminalId, input.exitedTerminalId) < 0,
+  );
   return (below[below.length - 1] ?? live[0])?.terminalId ?? null;
 }
 
@@ -158,4 +174,32 @@ export function resolveDefaultTerminalId(input: {
   }
 
   return nextTerminalId(input.existingTerminalIds);
+}
+
+/**
+ * t3code name for {@link resolveDefaultTerminalId} (project-script terminal
+ * resolution). Kept as an alias for parity; this app has no ProjectScript
+ * concept, so the behavior is identical.
+ */
+export const resolveProjectScriptTerminalId = resolveDefaultTerminalId;
+
+export interface ProjectScriptLike {
+  readonly name: string;
+  readonly runOnWorktreeCreate?: boolean;
+  readonly icon?: string;
+}
+
+/** t3code `projectScriptMenuLabel` parity (no worktrees here — label only). */
+export function projectScriptMenuLabel(script: ProjectScriptLike): string {
+  return script.runOnWorktreeCreate ? `${script.name} (setup)` : script.name;
+}
+
+/** t3code `projectScriptMenuIcon` parity — maps icon ids to SF Symbol names. */
+export function projectScriptMenuIcon(icon: ProjectScriptLike["icon"]): string {
+  if (icon === "test") return "flask";
+  if (icon === "lint") return "checklist";
+  if (icon === "configure") return "wrench.and.screwdriver";
+  if (icon === "build") return "hammer";
+  if (icon === "debug") return "ladybug";
+  return "play";
 }

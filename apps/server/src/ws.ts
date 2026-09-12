@@ -35,13 +35,16 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
     // auth via query token or header
     const qToken = url.searchParams.get("token");
     const hdr = req.headers.authorization as string | undefined;
-    const token = qToken ?? (hdr?.startsWith("Bearer ") ? hdr.slice(7) : undefined);
+    const token =
+      qToken ?? (hdr?.startsWith("Bearer ") ? hdr.slice(7) : undefined);
     if (!token || !verifyToken(token, opts.expectedToken)) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+    wss.handleUpgrade(req, socket, head, (ws) =>
+      wss.emit("connection", ws, req),
+    );
   });
 
   wss.on("connection", (ws: WebSocket) => {
@@ -49,6 +52,9 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
 
     // keep track of subscription cleanups
     const cleanups: Array<() => void> = [];
+    // attach cleanups keyed by channel so re-attaching the same terminal on
+    // one socket replaces the old listener instead of leaking duplicates.
+    const attachCleanups = new Map<string, () => void>();
 
     // heartbeat
     const pingInterval = setInterval(() => {
@@ -59,29 +65,123 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
     ws.on("message", async (raw) => {
       let msg: unknown;
       try {
-        msg = JSON.parse(raw.toString()) as { method?: string; params?: unknown; id?: string };
+        msg = JSON.parse(raw.toString()) as {
+          method?: string;
+          params?: unknown;
+          id?: string;
+        };
       } catch {
-        ws.send(JSON.stringify({ error: { code: "bad_request", message: "Invalid JSON" } }));
+        ws.send(
+          JSON.stringify({
+            error: { code: "bad_request", message: "Invalid JSON" },
+          }),
+        );
         return;
       }
-      const typedMsg = msg as { method?: string; params?: unknown; id?: string };
+      const typedMsg = msg as {
+        method?: string;
+        params?: unknown;
+        id?: string;
+      };
 
       // Streaming attach: terminal.attach
       if (typedMsg.method === "terminal.attach") {
         try {
-          const params = (typedMsg.params ?? {}) as { sessionId: string; terminalId: string };
+          const params = (typedMsg.params ?? {}) as {
+            sessionId: string;
+            terminalId: string;
+          };
+          const channel = `terminal:${params.sessionId}:${params.terminalId}`;
+          attachCleanups.get(channel)?.();
+          attachCleanups.delete(channel);
           const send = (ev: unknown) => {
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: "event", channel: `terminal:${params.sessionId}:${params.terminalId}`, payload: ev }));
+              ws.send(JSON.stringify({ type: "event", channel, payload: ev }));
             }
           };
-          const cleanup = await opts.terminalManager.attachStream(params as unknown as Parameters<typeof opts.terminalManager.attachStream>[0], async (ev) => send(ev));
-          cleanups.push(cleanup);
-          ws.send(JSON.stringify({ id: typedMsg.id, result: { attached: true } }));
+          const cleanup = await opts.terminalManager.attachStream(
+            params as unknown as Parameters<
+              typeof opts.terminalManager.attachStream
+            >[0],
+            async (ev) => send(ev),
+          );
+          attachCleanups.set(channel, cleanup);
+          cleanups.push(() => {
+            cleanup();
+            if (attachCleanups.get(channel) === cleanup)
+              attachCleanups.delete(channel);
+          });
+          ws.send(
+            JSON.stringify({ id: typedMsg.id, result: { attached: true } }),
+          );
         } catch (e: unknown) {
           const err = e as { code?: string; message?: string };
-          ws.send(JSON.stringify({ id: typedMsg.id, error: { code: err.code ?? "unknown", message: err.message ?? String(e) } }));
+          ws.send(
+            JSON.stringify({
+              id: typedMsg.id,
+              error: {
+                code: err.code ?? "unknown",
+                message: err.message ?? String(e),
+              },
+            }),
+          );
         }
+        return;
+      }
+
+      // Explicit detach: terminal.detach (removes this socket's attach listener).
+      if (typedMsg.method === "terminal.detach") {
+        try {
+          const params = (typedMsg.params ?? {}) as {
+            sessionId?: string;
+            terminalId?: string;
+          };
+          if (params.sessionId && params.terminalId) {
+            const channel = `terminal:${params.sessionId}:${params.terminalId}`;
+            attachCleanups.get(channel)?.();
+            attachCleanups.delete(channel);
+          } else {
+            for (const c of attachCleanups.values()) {
+              try {
+                c();
+              } catch {}
+            }
+            attachCleanups.clear();
+          }
+          ws.send(
+            JSON.stringify({ id: typedMsg.id, result: { detached: true } }),
+          );
+        } catch (e: unknown) {
+          const err = e as { code?: string; message?: string };
+          ws.send(
+            JSON.stringify({
+              id: typedMsg.id,
+              error: {
+                code: err.code ?? "unknown",
+                message: err.message ?? String(e),
+              },
+            }),
+          );
+        }
+        return;
+      }
+
+      // Metadata stream: terminal.subscribeMetadata (snapshot + upsert/remove).
+      if (typedMsg.method === "terminal.subscribeMetadata") {
+        const cleanup = opts.terminalManager.subscribeMetadata((ev) => {
+          if (ws.readyState === WebSocket.OPEN)
+            ws.send(
+              JSON.stringify({
+                type: "event",
+                channel: "terminal:metadata",
+                payload: ev,
+              }),
+            );
+        });
+        cleanups.push(cleanup);
+        ws.send(
+          JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }),
+        );
         return;
       }
 
@@ -89,33 +189,66 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
       if (typedMsg.method === "terminal.subscribe") {
         const cleanup = opts.terminalManager.subscribe((ev) => {
           if (ws.readyState === WebSocket.OPEN)
-            ws.send(JSON.stringify({ type: "event", channel: "terminal", payload: ev }));
+            ws.send(
+              JSON.stringify({
+                type: "event",
+                channel: "terminal",
+                payload: ev,
+              }),
+            );
         });
         cleanups.push(cleanup);
-        ws.send(JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }));
+        ws.send(
+          JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }),
+        );
         return;
       }
       if (typedMsg.method === "scripts.subscribe") {
         const cleanup = opts.scriptService.onEvent((ev) => {
           if (ws.readyState === WebSocket.OPEN)
-            ws.send(JSON.stringify({ type: "event", channel: "scripts", payload: ev }));
+            ws.send(
+              JSON.stringify({
+                type: "event",
+                channel: "scripts",
+                payload: ev,
+              }),
+            );
         });
         cleanups.push(cleanup);
-        ws.send(JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }));
+        ws.send(
+          JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }),
+        );
         return;
       }
-      if (typedMsg.method === "services.subscribe" || typedMsg.method === "servicesSubscribe") {
+      if (
+        typedMsg.method === "services.subscribe" ||
+        typedMsg.method === "servicesSubscribe"
+      ) {
         const cleanup = opts.serviceManager.onEvent((ev) => {
           if (ws.readyState === WebSocket.OPEN)
-            ws.send(JSON.stringify({ type: "event", channel: "services", payload: ev }));
+            ws.send(
+              JSON.stringify({
+                type: "event",
+                channel: "services",
+                payload: ev,
+              }),
+            );
         });
         cleanups.push(cleanup);
-        ws.send(JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }));
+        ws.send(
+          JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }),
+        );
         // immediate snapshot
         try {
           const list = opts.serviceManager.list();
           if (ws.readyState === WebSocket.OPEN)
-            ws.send(JSON.stringify({ type: "event", channel: "services", payload: { type: "snapshot", services: list } }));
+            ws.send(
+              JSON.stringify({
+                type: "event",
+                channel: "services",
+                payload: { type: "snapshot", services: list },
+              }),
+            );
         } catch {}
         return;
       }
@@ -125,15 +258,29 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
           try {
             const stats = await opts.systemService.getStats({});
             if (ws.readyState === WebSocket.OPEN)
-              ws.send(JSON.stringify({ type: "event", channel: "system", payload: stats }));
+              ws.send(
+                JSON.stringify({
+                  type: "event",
+                  channel: "system",
+                  payload: stats,
+                }),
+              );
           } catch {}
         }, 2000);
         cleanups.push(() => clearInterval(interval));
-        ws.send(JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }));
+        ws.send(
+          JSON.stringify({ id: typedMsg.id, result: { subscribed: true } }),
+        );
         // immediate
         opts.systemService.getStats({}).then((stats) => {
           if (ws.readyState === WebSocket.OPEN)
-            ws.send(JSON.stringify({ type: "event", channel: "system", payload: stats }));
+            ws.send(
+              JSON.stringify({
+                type: "event",
+                channel: "system",
+                payload: stats,
+              }),
+            );
         });
         return;
       }
@@ -141,15 +288,31 @@ export function attachWsRouter(opts: WsRouterOptions): WebSocketServer {
       // Normal RPC
       const { id, method, params } = typedMsg;
       if (!id || !method) {
-        ws.send(JSON.stringify({ error: { code: "bad_request", message: "Missing id/method" } }));
+        ws.send(
+          JSON.stringify({
+            error: { code: "bad_request", message: "Missing id/method" },
+          }),
+        );
         return;
       }
       try {
-        const result = await opts.registry.call(method, params, { token: null, reqId: id });
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ id, result: result ?? null }));
+        const result = await opts.registry.call(method, params, {
+          token: null,
+          reqId: id,
+        });
+        if (ws.readyState === WebSocket.OPEN)
+          ws.send(JSON.stringify({ id, result: result ?? null }));
       } catch (e: unknown) {
         if (ws.readyState === WebSocket.OPEN)
-          ws.send(JSON.stringify({ id, error: { code: (e as { code?: string }).code ?? "unknown", message: (e as Error).message ?? String(e) } }));
+          ws.send(
+            JSON.stringify({
+              id,
+              error: {
+                code: (e as { code?: string }).code ?? "unknown",
+                message: (e as Error).message ?? String(e),
+              },
+            }),
+          );
       }
     });
 

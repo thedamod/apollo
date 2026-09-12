@@ -5,7 +5,10 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as FileSystem from "@effect/platform/FileSystem";
 import * as Path from "@effect/platform/Path";
-import { HostProcessArchitecture, HostProcessPlatform } from "@home-server/shared/hostProcess";
+import {
+  HostProcessArchitecture,
+  HostProcessPlatform,
+} from "@home-server/shared/hostProcess";
 
 import * as PtyAdapter from "./ptyAdapter.ts";
 
@@ -38,7 +41,12 @@ const resolveNodePtySpawnHelperPath = Effect.gen(function* () {
   const candidates = [
     path.join(packageDir, "build", "Release", "spawn-helper"),
     path.join(packageDir, "build", "Debug", "spawn-helper"),
-    path.join(packageDir, "prebuilds", `${platform}-${architecture}`, "spawn-helper"),
+    path.join(
+      packageDir,
+      "prebuilds",
+      `${platform}-${architecture}`,
+      "spawn-helper",
+    ),
   ];
 
   for (const candidate of candidates) {
@@ -64,7 +72,9 @@ const ensureNodePtySpawnHelperExecutable = Effect.fn(function* () {
   }
 
   // Best-effort: avoid FileSystem.stat in packaged mode where some fs metadata can be missing.
-  yield* fs.chmod(helperPath, 0o755).pipe(Effect.orElseSucceed(() => undefined));
+  yield* fs
+    .chmod(helperPath, 0o755)
+    .pipe(Effect.orElseSucceed(() => undefined));
 });
 
 class NodePtyProcess implements PtyAdapter.PtyProcess {
@@ -178,7 +188,9 @@ export const layer = Layer.effect(PtyAdapter.PtyAdapter, make());
 
 class FakePtyProcess implements PtyAdapter.PtyProcess {
   private readonly dataListeners = new Set<(data: string) => void>();
-  private readonly exitListeners = new Set<(event: PtyAdapter.PtyExitEvent) => void>();
+  private readonly exitListeners = new Set<
+    (event: PtyAdapter.PtyExitEvent) => void
+  >();
   private readonly pidValue: number;
   private readonly shell: string;
 
@@ -288,15 +300,31 @@ export class FakePtyAdapterSync implements PtyAdapter.PtyAdapterSync {
   }
 }
 
-/** @deprecated Prefer `layer` / `layerFake` with Effect. Kept for TerminalManager migration. */
+/** Synchronous adapter factory for `TerminalManager` (which injects synchronously). */
 export function createPtyAdapter(): PtyAdapter.PtyAdapterSync {
+  // t3code parity: never silently fall back to a fake PTY in production —
+  // a missing native binding is a loud error, not fake output. Tests and
+  // environments without a toolchain can opt into the fake explicitly via
+  // `HOME_SERVER_PTY_FAKE=1`.
   try {
     const require = NodeModule.createRequire(import.meta.url);
     const nodePty = require("node-pty") as typeof import("node-pty");
     return new NodePtyAdapterSync(nodePty);
-  } catch {
-    console.warn("[pty] node-pty not available, using FakePtyAdapter (tests/dev)");
-    return new FakePtyAdapterSync();
+  } catch (e) {
+    if (
+      process.env.HOME_SERVER_PTY_FAKE === "1" ||
+      process.env.VITEST === "true"
+    ) {
+      console.warn(
+        "[pty] node-pty not available, using FakePtyAdapter (tests/dev opt-in)",
+      );
+      return new FakePtyAdapterSync();
+    }
+    throw new NodePtyModuleLoadError({
+      platform: process.platform,
+      architecture: process.arch,
+      cause: e,
+    });
   }
 }
 

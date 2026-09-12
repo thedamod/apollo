@@ -85,6 +85,9 @@ export const RpcMethod = {
 
   // terminal — streaming attach (server streams events after ack)
   terminalAttach: "terminal.attach",
+  terminalDetach: "terminal.detach",
+  terminalSubscribe: "terminal.subscribe",
+  terminalSubscribeMetadata: "terminal.subscribeMetadata",
 
   // system
   systemStats: "system.stats",
@@ -167,45 +170,123 @@ export interface RpcDefinition<I, O> {
 
 // Reference map for validation / docs
 export const RpcSchemas = {
-  [RpcMethod.filesystemBrowse]: { input: FilesystemBrowseInput, output: FilesystemBrowseResult },
-  [RpcMethod.filesystemStat]: { input: FilesystemPathInput, output: FilesystemStatResult },
-  [RpcMethod.filesystemReadFile]: { input: FilesystemReadInput, output: FilesystemReadResult },
-  [RpcMethod.filesystemMkdir]: { input: FilesystemMkdirInput, output: FilesystemMkdirResult },
-  [RpcMethod.filesystemRename]: { input: FilesystemRenameInput, output: FilesystemRenameResult },
-  [RpcMethod.filesystemDelete]: { input: FilesystemDeleteInput, output: FilesystemDeleteResult },
-  [RpcMethod.terminalOpen]: { input: TerminalOpenInput, output: TerminalSessionSnapshot },
+  [RpcMethod.filesystemBrowse]: {
+    input: FilesystemBrowseInput,
+    output: FilesystemBrowseResult,
+  },
+  [RpcMethod.filesystemStat]: {
+    input: FilesystemPathInput,
+    output: FilesystemStatResult,
+  },
+  [RpcMethod.filesystemReadFile]: {
+    input: FilesystemReadInput,
+    output: FilesystemReadResult,
+  },
+  [RpcMethod.filesystemMkdir]: {
+    input: FilesystemMkdirInput,
+    output: FilesystemMkdirResult,
+  },
+  [RpcMethod.filesystemRename]: {
+    input: FilesystemRenameInput,
+    output: FilesystemRenameResult,
+  },
+  [RpcMethod.filesystemDelete]: {
+    input: FilesystemDeleteInput,
+    output: FilesystemDeleteResult,
+  },
+  [RpcMethod.terminalOpen]: {
+    input: TerminalOpenInput,
+    output: TerminalSessionSnapshot,
+  },
   [RpcMethod.terminalWrite]: { input: TerminalWriteInput, output: z.void() },
   [RpcMethod.terminalResize]: { input: TerminalResizeInput, output: z.void() },
   [RpcMethod.terminalClear]: { input: TerminalClearInput, output: z.void() },
-  [RpcMethod.terminalRestart]: { input: TerminalRestartInput, output: TerminalSessionSnapshot },
+  [RpcMethod.terminalRestart]: {
+    input: TerminalRestartInput,
+    output: TerminalSessionSnapshot,
+  },
   [RpcMethod.terminalClose]: { input: TerminalCloseInput, output: z.void() },
-  [RpcMethod.terminalList]: { input: z.object({ sessionId: z.string().optional() }), output: z.array(z.any()) },
+  [RpcMethod.terminalList]: {
+    input: z.object({ sessionId: z.string().optional() }),
+    output: z.array(z.any()),
+  },
   [RpcMethod.systemStats]: { input: SystemStatsInput, output: SystemStats },
-  [RpcMethod.scriptsList]: { input: ScriptListInput ?? z.object({}), output: z.array(ScriptDefinition) },
+  [RpcMethod.scriptsList]: {
+    input: ScriptListInput ?? z.object({}),
+    output: z.array(ScriptDefinition),
+  },
   [RpcMethod.scriptsGet]: { input: ScriptGetInput, output: ScriptDefinition },
-  [RpcMethod.scriptsUpsert]: { input: ScriptUpsertInput, output: ScriptDefinition },
+  [RpcMethod.scriptsUpsert]: {
+    input: ScriptUpsertInput,
+    output: ScriptDefinition,
+  },
   [RpcMethod.scriptsDelete]: { input: ScriptDeleteInput, output: z.void() },
   [RpcMethod.scriptsRun]: { input: ScriptRunInput, output: ScriptRun },
   [RpcMethod.scriptsStop]: { input: ScriptStopInput, output: z.void() },
-  [RpcMethod.scriptsLogs]: { input: ScriptLogsInput, output: z.object({ runId: z.string(), content: z.string() }) },
-  [RpcMethod.scriptsRuns]: { input: ScriptRunsInput ?? z.object({}), output: z.array(ScriptRun) },
+  [RpcMethod.scriptsLogs]: {
+    input: ScriptLogsInput,
+    output: z.object({ runId: z.string(), content: z.string() }),
+  },
+  [RpcMethod.scriptsRuns]: {
+    input: ScriptRunsInput ?? z.object({}),
+    output: z.array(ScriptRun),
+  },
   [RpcMethod.scriptsGetRun]: { input: ScriptGetRunInput, output: ScriptRun },
-  [RpcMethod.servicesList]: { input: ServiceListInput ?? z.object({}), output: z.array(ServiceInstance) },
+  [RpcMethod.servicesList]: {
+    input: ServiceListInput ?? z.object({}),
+    output: z.array(ServiceInstance),
+  },
   [RpcMethod.servicesGet]: { input: ServiceGetInput, output: ServiceInstance },
-  [RpcMethod.servicesCreate]: { input: ServiceCreateInput, output: ServiceDefinition },
-  [RpcMethod.servicesUpdate]: { input: ServiceUpdateInput, output: ServiceDefinition },
+  [RpcMethod.servicesCreate]: {
+    input: ServiceCreateInput,
+    output: ServiceDefinition,
+  },
+  [RpcMethod.servicesUpdate]: {
+    input: ServiceUpdateInput,
+    output: ServiceDefinition,
+  },
   [RpcMethod.servicesDelete]: { input: ServiceDeleteInput, output: z.void() },
-  [RpcMethod.servicesStart]: { input: ServiceStartInput, output: ServiceInstance },
-  [RpcMethod.servicesStop]: { input: ServiceStopInput, output: ServiceInstance },
-  [RpcMethod.servicesRestart]: { input: ServiceRestartInput, output: ServiceInstance },
-  [RpcMethod.servicesLogs]: { input: ServiceLogsInput, output: z.object({ id: z.string(), content: z.string() }) },
-  [RpcMethod.servicesStatus]: { input: ServiceStatusInput, output: ServiceInstance },
-  [RpcMethod.servicesDiscover]: { input: ServiceDiscoverInput ?? z.object({}), output: z.array(SystemdUnitSummary) },
-  [RpcMethod.servicesSetEnabled]: { input: ServiceSetEnabledInput, output: ServiceInstance },
-  [RpcMethod.servicesDockerList]: { input: ServiceDockerListInput ?? z.object({}), output: z.array(DockerContainerSummary) },
+  [RpcMethod.servicesStart]: {
+    input: ServiceStartInput,
+    output: ServiceInstance,
+  },
+  [RpcMethod.servicesStop]: {
+    input: ServiceStopInput,
+    output: ServiceInstance,
+  },
+  [RpcMethod.servicesRestart]: {
+    input: ServiceRestartInput,
+    output: ServiceInstance,
+  },
+  [RpcMethod.servicesLogs]: {
+    input: ServiceLogsInput,
+    output: z.object({ id: z.string(), content: z.string() }),
+  },
+  [RpcMethod.servicesStatus]: {
+    input: ServiceStatusInput,
+    output: ServiceInstance,
+  },
+  [RpcMethod.servicesDiscover]: {
+    input: ServiceDiscoverInput ?? z.object({}),
+    output: z.array(SystemdUnitSummary),
+  },
+  [RpcMethod.servicesSetEnabled]: {
+    input: ServiceSetEnabledInput,
+    output: ServiceInstance,
+  },
+  [RpcMethod.servicesDockerList]: {
+    input: ServiceDockerListInput ?? z.object({}),
+    output: z.array(DockerContainerSummary),
+  },
   [RpcMethod.tunnelGet]: { input: z.object({}), output: TunnelInfo },
-  [RpcMethod.tunnelConfigure]: { input: TunnelConfigureInput, output: TunnelInfo },
-  [RpcMethod.serverProbe]: { input: z.object({}), output: z.object({ ok: z.boolean() }) },
+  [RpcMethod.tunnelConfigure]: {
+    input: TunnelConfigureInput,
+    output: TunnelInfo,
+  },
+  [RpcMethod.serverProbe]: {
+    input: z.object({}),
+    output: z.object({ ok: z.boolean() }),
+  },
   [RpcMethod.serverGetInfo]: {
     input: z.object({}),
     output: z.object({

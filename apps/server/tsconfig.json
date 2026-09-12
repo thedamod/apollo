@@ -13,5 +13,8 @@
     "noEmit": false,
     "sourceMap": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Cross-package pure-TS tests (run by vitest, which resolves them
+  // directly): tsc must not compile them into dist (rootDir violation).
+  "exclude": ["src/services/terminal/vtParser.test.ts"]
 }

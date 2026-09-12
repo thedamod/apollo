@@ -8,6 +8,9 @@
     "start:lan": "expo start --lan",
     "android": "expo run:android",
     "ios": "expo run:ios",
+    "build:android:preview": "eas build --platform android --profile preview",
+    "build:android:production": "eas build --platform android --profile production",
+    "submit:android": "eas submit --platform android --latest",
     "typecheck": "tsc --noEmit",
     "lint": "expo lint"
   },
@@ -23,6 +26,7 @@
     "@shikijs/themes": "^4.4.3",
     "expo": "~56.0.0",
     "expo-blur": "~56.0.4",
+    "expo-clipboard": "^57.0.2",
     "expo-document-picker": "~56.0.4",
     "expo-file-system": "~56.0.11",
     "expo-font": "~56.0.0",
@@ -43,6 +47,7 @@
   "devDependencies": {
     "@types/react": "~19.2.0",
     "babel-preset-expo": "~56.0.0",
+    "eas-cli": "^24.3.0",
     "typescript": "^5.7.3"
   }
 }

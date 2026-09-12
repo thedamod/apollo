@@ -21,13 +21,22 @@
     },
     "android": {
       "package": "gg.home.aether",
+      "versionCode": 1,
       "usesCleartextTraffic": true,
-      "windowSoftInputMode": "adjustResize"
+      "windowSoftInputMode": "adjustResize",
+      "adaptiveIcon": {
+        "backgroundColor": "#0b0b0c"
+      }
     },
     "plugins": [
       "expo-secure-store",
       "expo-font",
       "expo-status-bar"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "cf047b91-86f0-4388-a03f-a1718292b44a"
+      }
+    }
   }
 }

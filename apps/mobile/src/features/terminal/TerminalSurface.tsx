@@ -6,10 +6,18 @@
  * Same component contract as before (`TerminalSurface` + `estimateGridSize`);
  * text input moved to the screen's hidden field, so this is render-only.
  */
-import { memo } from "react";
-import { Text, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from "react-native";
+import { memo, useEffect, useState } from "react";
+import {
+  Linking,
+  Text,
+  View,
+  type LayoutChangeEvent,
+  type StyleProp,
+  type ViewStyle,
+} from "react-native";
 import { getMobileTerminalTheme, type TerminalTheme } from "./terminalTheme";
 import { useAppearancePreferences } from "../appearance/AppearanceContext";
+import { extractTerminalLinks } from "./terminalLinks";
 import type { VtAttrs, VtCell, VtColorSpec, VtParser } from "./vtParser";
 
 export interface TerminalSurfaceProps {
@@ -21,7 +29,10 @@ export interface TerminalSurfaceProps {
   readonly isRunning: boolean;
   readonly theme?: TerminalTheme;
   readonly style?: StyleProp<ViewStyle>;
-  readonly onResize: (size: { readonly cols: number; readonly rows: number }) => void;
+  readonly onResize: (size: {
+    readonly cols: number;
+    readonly rows: number;
+  }) => void;
 }
 
 export function estimateGridSize(input: {
@@ -42,7 +53,10 @@ const MAX_RENDER_LINES = 250;
 const CUBE_STEPS = [0, 95, 135, 175, 215, 255];
 
 function hex(r: number, g: number, b: number): string {
-  const c = (v: number) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0");
+  const c = (v: number) =>
+    Math.max(0, Math.min(255, Math.round(v)))
+      .toString(16)
+      .padStart(2, "0");
   return `#${c(r)}${c(g)}${c(b)}`;
 }
 
@@ -52,7 +66,11 @@ function resolveSpec(spec: VtColorSpec, theme: TerminalTheme): string {
   if (i >= 0 && i < theme.palette.length) return theme.palette[i];
   if (i >= 16 && i < 232) {
     const n = i - 16;
-    return hex(CUBE_STEPS[Math.floor(n / 36)], CUBE_STEPS[Math.floor((n % 36) / 6)], CUBE_STEPS[n % 6]);
+    return hex(
+      CUBE_STEPS[Math.floor(n / 36)],
+      CUBE_STEPS[Math.floor((n % 36) / 6)],
+      CUBE_STEPS[n % 6],
+    );
   }
   if (i >= 232 && i < 256) {
     const v = 8 + (i - 232) * 10;
@@ -66,28 +84,40 @@ interface RunStyle {
   backgroundColor?: string;
   fontWeight?: "bold";
   fontStyle?: "italic";
-  textDecorationLine?: "underline" | "line-through" | "underline line-through" | "none";
+  textDecorationLine?:
+    "underline" | "line-through" | "underline line-through" | "none";
+  borderTopWidth?: number;
+  borderTopColor?: string;
   opacity?: number;
 }
 
 function styleKey(s: RunStyle): string {
-  return `${s.color}|${s.backgroundColor ?? ""}|${s.fontWeight ?? ""}|${s.fontStyle ?? ""}|${s.textDecorationLine ?? ""}|${s.opacity ?? ""}`;
+  return `${s.color}|${s.backgroundColor ?? ""}|${s.fontWeight ?? ""}|${s.fontStyle ?? ""}|${s.textDecorationLine ?? ""}|${s.borderTopWidth ?? ""}|${s.borderTopColor ?? ""}|${s.opacity ?? ""}`;
 }
 
-function runStyleFor(attrs: VtAttrs, theme: TerminalTheme, defaultBg: string | null): RunStyle {
+function runStyleFor(
+  attrs: VtAttrs,
+  theme: TerminalTheme,
+  defaultBg: string | null,
+): RunStyle {
   let fg = attrs.fg ? resolveSpec(attrs.fg, theme) : theme.foreground;
   // xterm convention: bold + standard color renders as the bright variant.
   if (attrs.bold && attrs.fg?.kind === "palette" && attrs.fg.index < 8) {
     fg = resolveSpec({ kind: "palette", index: attrs.fg.index + 8 }, theme);
   }
-  let bg = attrs.bg ? resolveSpec(attrs.bg, theme) : defaultBg ?? undefined;
+  let bg = attrs.bg ? resolveSpec(attrs.bg, theme) : (defaultBg ?? undefined);
   if (attrs.inverse) {
     const swappedFg = bg ?? theme.background;
     const swappedBg = fg;
     fg = swappedFg;
     bg = swappedBg;
   }
-  let decoration: "underline" | "line-through" | "underline line-through" | undefined;
+  // Invisible text renders as blank space (takes up its cells).
+  if (attrs.invisible && !attrs.inverse) {
+    fg = bg ?? theme.background;
+  }
+  let decoration:
+    "underline" | "line-through" | "underline line-through" | undefined;
   if (attrs.underline && attrs.strike) decoration = "underline line-through";
   else if (attrs.underline) decoration = "underline";
   else if (attrs.strike) decoration = "line-through";
@@ -97,7 +127,9 @@ function runStyleFor(attrs: VtAttrs, theme: TerminalTheme, defaultBg: string | n
     ...(attrs.bold ? { fontWeight: "bold" as const } : {}),
     ...(attrs.italic ? { fontStyle: "italic" as const } : {}),
     ...(decoration ? { textDecorationLine: decoration } : {}),
-    ...(attrs.dim ? { opacity: 0.65 } : {}),
+    // RN Text has no overline — emulate with a top border in the fg color.
+    ...(attrs.overline ? { borderTopWidth: 1, borderTopColor: fg } : {}),
+    ...(attrs.dim || attrs.faint ? { opacity: 0.65 } : {}),
   };
 }
 
@@ -106,6 +138,7 @@ interface Run {
   width: number;
   widths: number[];
   style: RunStyle;
+  link: string | null;
 }
 
 function lineRuns(line: VtCell[], theme: TerminalTheme): Run[] {
@@ -114,14 +147,16 @@ function lineRuns(line: VtCell[], theme: TerminalTheme): Run[] {
   let width = 0;
   let widths: number[] = [];
   let style: RunStyle | null = null;
+  let link: string | null = null;
   let key = "";
   const flush = () => {
-    if (style) runs.push({ text, width, widths, style });
+    if (style) runs.push({ text, width, widths, style, link });
   };
   for (const cell of line) {
     if (cell.w === 0) continue; // wide-char trailing half
     const cellStyle = runStyleFor(cell.attrs, theme, null);
-    const cellKey = styleKey(cellStyle);
+    const cellLink = cell.link ?? null;
+    const cellKey = `${styleKey(cellStyle)}|${cellLink ?? ""}`;
     if (style && cellKey === key) {
       text += cell.ch;
       width += cell.w;
@@ -132,30 +167,100 @@ function lineRuns(line: VtCell[], theme: TerminalTheme): Run[] {
       width = cell.w;
       widths = [cell.w];
       style = cellStyle;
+      link = cellLink;
       key = cellKey;
     }
   }
   flush();
-  return runs;
+  return splitUrlRuns(runs);
+}
+
+/**
+ * Split runs without an OSC 8 link on plain-text URL matches so bare URLs
+ * pasted into the shell are tappable too (t3code `terminal-links.ts`
+ * parity, URL kind only — path matches need a file-browser handoff).
+ */
+function splitUrlRuns(runs: Run[]): Run[] {
+  const out: Run[] = [];
+  for (const run of runs) {
+    if (run.link || run.text.trim().length === 0) {
+      out.push(run);
+      continue;
+    }
+    const matches = extractTerminalLinks(run.text).filter(
+      (m) => m.kind === "url",
+    );
+    if (matches.length === 0) {
+      out.push(run);
+      continue;
+    }
+    const chars = Array.from(run.text);
+    let cursor = 0;
+    for (const m of matches) {
+      // Map UTF-16 offsets (regex) to code-point indices.
+      const startCp = Array.from(run.text.slice(0, m.start)).length;
+      const endCp = startCp + Array.from(m.text).length;
+      if (startCp > cursor) {
+        out.push({
+          text: chars.slice(cursor, startCp).join(""),
+          width: run.widths.slice(cursor, startCp).reduce((a, b) => a + b, 0),
+          widths: run.widths.slice(cursor, startCp),
+          style: run.style,
+          link: null,
+        });
+      }
+      out.push({
+        text: chars.slice(startCp, endCp).join(""),
+        width: run.widths.slice(startCp, endCp).reduce((a, b) => a + b, 0),
+        widths: run.widths.slice(startCp, endCp),
+        style: run.style,
+        link: m.text,
+      });
+      cursor = endCp;
+    }
+    if (cursor < chars.length) {
+      out.push({
+        text: chars.slice(cursor).join(""),
+        width: run.widths.slice(cursor).reduce((a, b) => a + b, 0),
+        widths: run.widths.slice(cursor),
+        style: run.style,
+        link: null,
+      });
+    }
+  }
+  return out;
 }
 
 function TerminalGridLine({
   runs,
   cursorCol,
-  cursorStyle,
+  cursorBlock,
+  cursorText,
   fontSize,
   lineHeight,
 }: {
   runs: Run[];
   cursorCol: number | null;
-  cursorStyle: RunStyle;
+  /** block-cursor cell style (inverted). */
+  cursorBlock: RunStyle;
+  /** underline/bar-cursor cell style (fg-colored, underlined). */
+  cursorText: RunStyle | null;
   fontSize: number;
   lineHeight: number;
 }) {
+  const cursorCellStyle = cursorText ?? cursorBlock;
   if (runs.length === 0) {
     return (
       <Text style={{ fontFamily: "monospace", fontSize, lineHeight }}>
-        {cursorCol === 0 ? <Text style={[{ fontFamily: "monospace", fontSize }, cursorStyle]}> </Text> : " "}
+        {cursorCol === 0 ? (
+          <Text
+            style={[{ fontFamily: "monospace", fontSize }, cursorCellStyle]}
+          >
+            {" "}
+          </Text>
+        ) : (
+          " "
+        )}
       </Text>
     );
   }
@@ -165,12 +270,31 @@ function TerminalGridLine({
     const runStart = col;
     const runEnd = col + run.width;
     col = runEnd;
-    if (cursorCol === null || cursorCol < runStart || cursorCol >= runEnd) {
-      children.push(
-        <Text key={ri} style={[{ fontFamily: "monospace", fontSize }, run.style]}>
-          {run.text}
-        </Text>,
+    const runText = (t: string, keySuffix: string, style: RunStyle) =>
+      run.link ? (
+        <Text
+          key={`${ri}-${keySuffix}`}
+          style={[
+            { fontFamily: "monospace", fontSize },
+            style,
+            { textDecorationLine: "underline" },
+          ]}
+          onPress={() => {
+            Linking.openURL(run.link as string).catch(() => {});
+          }}
+        >
+          {t}
+        </Text>
+      ) : (
+        <Text
+          key={`${ri}-${keySuffix}`}
+          style={[{ fontFamily: "monospace", fontSize }, style]}
+        >
+          {t}
+        </Text>
       );
+    if (cursorCol === null || cursorCol < runStart || cursorCol >= runEnd) {
+      children.push(runText(run.text, "t", run.style));
       return;
     }
     // Split the run around the cursor column.
@@ -193,34 +317,34 @@ function TerminalGridLine({
       }
     }
     if (before) {
-      children.push(
-        <Text key={`${ri}-b`} style={[{ fontFamily: "monospace", fontSize }, run.style]}>
-          {before}
-        </Text>,
-      );
+      children.push(runText(before, "b", run.style));
     }
     children.push(
-      <Text key={`${ri}-c`} style={[{ fontFamily: "monospace", fontSize }, cursorStyle]}>
+      <Text
+        key={`${ri}-c`}
+        style={[{ fontFamily: "monospace", fontSize }, cursorCellStyle]}
+      >
         {at || " "}
       </Text>,
     );
     if (after) {
-      children.push(
-        <Text key={`${ri}-a`} style={[{ fontFamily: "monospace", fontSize }, run.style]}>
-          {after}
-        </Text>,
-      );
+      children.push(runText(after, "a", run.style));
     }
   });
   if (cursorCol !== null && cursorCol >= col) {
     children.push(
-      <Text key="cursor-pad" style={[{ fontFamily: "monospace", fontSize }, cursorStyle]}>
+      <Text
+        key="cursor-pad"
+        style={[{ fontFamily: "monospace", fontSize }, cursorCellStyle]}
+      >
         {" "}
       </Text>,
     );
   }
   return (
-    <Text style={{ fontFamily: "monospace", fontSize, lineHeight }}>{children}</Text>
+    <Text style={{ fontFamily: "monospace", fontSize, lineHeight }}>
+      {children}
+    </Text>
   );
 }
 
@@ -228,7 +352,9 @@ function TerminalSurfaceInner(props: TerminalSurfaceProps) {
   const fontSize = props.fontSize ?? 12;
   const lineHeight = Math.round(fontSize * 1.35);
   const { themeAppearance, preferences } = useAppearancePreferences();
-  const theme = props.theme ?? getMobileTerminalTheme(preferences.themeMode, themeAppearance);
+  const theme =
+    props.theme ??
+    getMobileTerminalTheme(preferences.themeMode, themeAppearance);
 
   const handleLayout = (event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
@@ -239,11 +365,30 @@ function TerminalSurfaceInner(props: TerminalSurfaceProps) {
 
   const lines = props.parser.lines;
   const start = Math.max(0, lines.length - MAX_RENDER_LINES);
-  const cursorStyle: RunStyle = {
+  const cursorBlock: RunStyle = {
     color: theme.cursorBackground,
     backgroundColor: theme.cursorForeground,
   };
-  const showCursor = props.isRunning && props.parser.cursorVisible;
+  // Underline/bar cursor: fg-colored cell with an underline instead of the
+  // inverted block (t3code Ghostty cursor-style parity).
+  const cursorText: RunStyle | null =
+    props.parser.cursorStyle === "block"
+      ? null
+      : {
+          color: theme.cursorForeground,
+          textDecorationLine: "underline",
+        };
+  // Blinking cursor (DECSCUSR … blink): 500 ms timer like t3code's canvas.
+  const [blinkOn, setBlinkOn] = useState(true);
+  useEffect(() => {
+    if (!props.parser.cursorBlink) {
+      setBlinkOn(true);
+      return;
+    }
+    const timer = setInterval(() => setBlinkOn((v) => !v), 500);
+    return () => clearInterval(timer);
+  }, [props.parser.cursorBlink, props.version]);
+  const showCursor = props.isRunning && props.parser.cursorVisible && blinkOn;
 
   return (
     <View
@@ -253,13 +398,16 @@ function TerminalSurfaceInner(props: TerminalSurfaceProps) {
       {lines.slice(start).map((line, i) => {
         const absoluteY = start + i;
         const cursorCol =
-          showCursor && absoluteY === props.parser.cursorY ? props.parser.cursorX : null;
+          showCursor && absoluteY === props.parser.cursorY
+            ? props.parser.cursorX
+            : null;
         return (
           <TerminalGridLine
             key={`${props.terminalKey}:${absoluteY}`}
             runs={lineRuns(line, theme)}
             cursorCol={cursorCol}
-            cursorStyle={cursorStyle}
+            cursorBlock={cursorBlock}
+            cursorText={cursorText}
             fontSize={fontSize}
             lineHeight={lineHeight}
           />

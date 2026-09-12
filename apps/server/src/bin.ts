@@ -167,8 +167,19 @@ async function main(): Promise<void> {
       if (config.tailscaleServeEnabled) {
         tailscale
           .tryEnsureTailscaleServe({ localPort: actualPort, servePort: config.tailscaleServePort })
-          .then((ok) => {
-            if (ok) logger.info("Tailscale Serve configured", { localPort: actualPort, servePort: config.tailscaleServePort });
+          .then(async (ok) => {
+            if (!ok) return;
+            logger.info("Tailscale Serve configured", { localPort: actualPort, servePort: config.tailscaleServePort });
+            try {
+              const st = await tailscale.readTailscaleStatus();
+              if (st.magicDnsName) {
+                const publicUrl = tailscale.buildTailscaleHttpsBaseUrl({
+                  magicDnsName: st.magicDnsName,
+                  servePort: config.tailscaleServePort,
+                });
+                console.log(`  tailscale: ${publicUrl}  (use this https URL in the mobile app)`);
+              }
+            } catch {}
           });
       }
 

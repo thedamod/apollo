@@ -2,21 +2,33 @@
  * Attached terminal session hook — t3code `use-terminal-session.ts` ported to
  * this app's RpcClient (sessionId scoping instead of environment+thread).
  *
- * - `useAttachedTerminalSession`: opens/attaches a single terminal and folds
- *   the `terminal.attach` event stream into buffer state via
+ * - `useAttachedTerminalSession`: attaches a single terminal and folds the
+ *   `terminal.attach` event stream into buffer state via
  *   `applyTerminalAttachStreamEvent`.
- * - `useKnownTerminalSessions`: keeps the `terminal.list` snapshot fresh via
- *   the global `terminal` channel.
+ * - `useKnownTerminalSessions`: folds the `terminal.subscribeMetadata` stream
+ *   incrementally (snapshot + upsert/remove) via `applyTerminalSummaryEvent`.
+ *
+ * t3code parity notes:
+ * - No client-side auto-reopen timers: a missing session is (re)created by
+ *   the server's `restartIfNotRunning` attach flag (with the caller-supplied
+ *   cwd); a dead session stays dead until the user restarts it — same as
+ *   t3code, where open/restart are explicit user-invoked commands.
+ * - Cleanup sends an explicit `terminal.detach` so the server drops this
+ *   socket's attach listener (t3code teardown is owned by the Atom runtime's
+ *   refcount; our fire-and-forget subscribe needs the explicit message, and
+ *   the server additionally replaces duplicate attaches per channel).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   TerminalAttachStreamEvent,
+  TerminalMetadataStreamEvent,
   TerminalSummary,
 } from "../../lib/terminalProtocol";
 import type { RpcClient } from "../../lib/client";
 import {
   EMPTY_TERMINAL_BUFFER_STATE,
   applyTerminalAttachStreamEvent,
+  applyTerminalSummaryEvent,
   combineTerminalSessionState,
   type TerminalBufferState,
   type TerminalSessionState,
@@ -43,9 +55,16 @@ function isAttachEvent(payload: unknown): payload is TerminalAttachStreamEvent {
     t === "error" ||
     t === "cleared" ||
     t === "restarted" ||
-    t === "activity" ||
-    t === "started"
+    t === "activity"
   );
+}
+
+function isMetadataEvent(
+  payload: unknown,
+): payload is TerminalMetadataStreamEvent {
+  if (typeof payload !== "object" || payload === null) return false;
+  const t = (payload as { type?: unknown }).type;
+  return t === "snapshot" || t === "upsert" || t === "remove";
 }
 
 export function useAttachedTerminalSession(input: {
@@ -54,7 +73,9 @@ export function useAttachedTerminalSession(input: {
   terminal: AttachedTerminalInput | null;
 }): TerminalSessionState {
   const { client, sessionId, terminal } = input;
-  const [bufferState, setBufferState] = useState<TerminalBufferState>(EMPTY_TERMINAL_BUFFER_STATE);
+  const [bufferState, setBufferState] = useState<TerminalBufferState>(
+    EMPTY_TERMINAL_BUFFER_STATE,
+  );
   const [summary, setSummary] = useState<TerminalSummary | null>(null);
 
   const terminalId = terminal?.terminalId ?? null;
@@ -86,7 +107,9 @@ export function useAttachedTerminalSession(input: {
 
     const off = client.onEvent((ch, payload) => {
       if (cancelled || ch !== channel || !isAttachEvent(payload)) return;
-      const ev = payload as TerminalAttachStreamEvent & { snapshot?: { cwd?: string } };
+      const ev = payload as TerminalAttachStreamEvent & {
+        snapshot?: { cwd?: string };
+      };
       setBufferState((prev) => applyTerminalAttachStreamEvent(prev, ev));
       if ((ev.type === "snapshot" || ev.type === "restarted") && ev.snapshot) {
         const snapshot = ev.snapshot;
@@ -106,58 +129,54 @@ export function useAttachedTerminalSession(input: {
       } else if (ev.type === "activity" && "hasRunningSubprocess" in ev) {
         const a = ev as { hasRunningSubprocess: boolean; label: string };
         setSummary((prev) =>
-          prev ? { ...prev, hasRunningSubprocess: a.hasRunningSubprocess, label: a.label } : prev,
+          prev
+            ? {
+                ...prev,
+                hasRunningSubprocess: a.hasRunningSubprocess,
+                label: a.label,
+              }
+            : prev,
         );
       } else if (ev.type === "exited") {
         setSummary((prev) =>
           prev
-            ? { ...prev, status: "exited", exitCode: ev.exitCode, exitSignal: ev.exitSignal }
+            ? {
+                ...prev,
+                status: "exited",
+                exitCode: ev.exitCode,
+                exitSignal: ev.exitSignal,
+              }
             : prev,
         );
       }
     });
 
     const { cols, rows } = sizeRef.current;
+    const cwd = cwdRef.current || undefined;
     client.subscribe("terminal.attach", {
       sessionId,
       terminalId,
+      ...(cwd ? { cwd } : {}),
       ...(cols ? { cols } : {}),
       ...(rows ? { rows } : {}),
+      ...(envRef.current ? { env: envRef.current } : {}),
       restartIfNotRunning: true,
     });
 
-    // If attach lands on a dead session without restart, explicitly open it —
-    // mirrors t3code's stale-reopen path (dead status + processed events).
-    // Only when a cwd is known; otherwise the attach `restartIfNotRunning`
-    // flag already lets the server open with the home directory.
-    const staleTimer = setTimeout(async () => {
-      if (cancelled) return;
-      try {
-        const list = (await client.call("terminal.list", { sessionId })) as TerminalSummary[];
-        const found = list.find((s) => s.terminalId === terminalId);
-        const cwd = cwdRef.current || found?.cwd || "";
-        if ((!found || found.status === "exited" || found.status === "error") && cwd) {
-          const size = sizeRef.current;
-          await client.call("terminal.open", {
-            sessionId,
-            terminalId,
-            cwd,
-            cols: size.cols,
-            rows: size.rows,
-            ...(envRef.current ? { env: envRef.current } : {}),
-          });
-        }
-      } catch {}
-    }, 1200);
-
     return () => {
       cancelled = true;
-      clearTimeout(staleTimer);
       off();
+      // Tell the server to drop this socket's attach listener (the server
+      // also replaces duplicate attaches per channel, so a missed detach
+      // after a crash can never accumulate listeners).
+      client.subscribe("terminal.detach", { sessionId, terminalId });
     };
   }, [attachKey, channel, client, sessionId, terminalId]);
 
-  return useMemo(() => combineTerminalSessionState(summary, bufferState), [summary, bufferState]);
+  return useMemo(
+    () => combineTerminalSessionState(summary, bufferState),
+    [summary, bufferState],
+  );
 }
 
 export interface KnownTerminalSession {
@@ -178,25 +197,42 @@ export function useKnownTerminalSessions(input: {
   const refresh = useCallback(async () => {
     if (!client) return;
     try {
-      const list = (await client.call("terminal.list", { sessionId })) as TerminalSummary[];
+      const list = (await client.call("terminal.list", {
+        sessionId,
+      })) as TerminalSummary[];
       setSummaries(Array.isArray(list) ? list : []);
     } catch {}
   }, [client, sessionId]);
 
   useEffect(() => {
-    void refresh();
+    setSummaries([]);
     if (!client) return;
-    client.subscribe("terminal.subscribe", {});
+    let cancelled = false;
+    // Initial list, then incremental metadata fold (t3code
+    // `subscribeTerminalMetadata` parity — no polling).
+    void refresh();
+    client.subscribe("terminal.subscribeMetadata", {});
     const off = client.onEvent((channel, payload) => {
+      if (cancelled) return;
+      if (channel === "terminal:metadata" && isMetadataEvent(payload)) {
+        setSummaries((prev) => {
+          const next = applyTerminalSummaryEvent(prev, payload);
+          return next.filter((s) => s.sessionId === sessionId);
+        });
+        return;
+      }
       if (channel !== "terminal") return;
-      const ev = payload as { type?: string; sessionId?: string } & Record<string, unknown>;
+      const ev = payload as { type?: string; sessionId?: string } & Record<
+        string,
+        unknown
+      >;
       if (ev.sessionId && ev.sessionId !== sessionId) return;
+      // Legacy/global event for this session — refresh once to converge.
       void refresh();
     });
-    const timer = setInterval(refresh, 5000);
     return () => {
+      cancelled = true;
       off();
-      clearInterval(timer);
     };
   }, [client, refresh, sessionId]);
 
@@ -210,7 +246,11 @@ export function useKnownTerminalSessions(input: {
           hasRunningSubprocess: s.hasRunningSubprocess,
           updatedAt: s.updatedAt,
         }))
-        .sort((a, b) => a.terminalId.localeCompare(b.terminalId, undefined, { numeric: true })),
+        .sort((a, b) =>
+          a.terminalId.localeCompare(b.terminalId, undefined, {
+            numeric: true,
+          }),
+        ),
     [summaries],
   );
 }

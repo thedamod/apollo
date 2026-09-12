@@ -2,6 +2,8 @@
  * Buffer replay helpers — ported 1:1 from t3code
  * `apps/mobile/src/features/terminal/terminalBufferReplay.ts`.
  */
+import { terminalDebugLog } from "./terminalDebugLog";
+
 export const TERMINAL_BUFFER_REPLAY_STABILITY_DELAY_MS = 180;
 
 export function getTerminalBufferReplayKey(input: {
@@ -18,7 +20,15 @@ export function getTerminalSurfaceReplayBuffer(input: {
 }): string {
   // Pass live buffer whenever ready key is unset or matches. Only return "" when ready key is
   // stale vs current replay key (e.g. mid font-size transition).
-  if (input.readyReplayKey !== null && input.readyReplayKey !== input.replayKey) {
+  if (
+    input.readyReplayKey !== null &&
+    input.readyReplayKey !== input.replayKey
+  ) {
+    terminalDebugLog("replay:stale-key-hiding-buffer", {
+      replayKey: input.replayKey,
+      readyReplayKey: input.readyReplayKey,
+      bufferLen: input.buffer.length,
+    });
     return "";
   }
 

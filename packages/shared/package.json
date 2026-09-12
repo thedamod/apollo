@@ -8,6 +8,7 @@
     "./hostProcess": { "types": "./src/hostProcess.ts", "import": "./src/hostProcess.ts" },
     "./path": { "types": "./src/path.ts", "import": "./src/path.ts" },
     "./shell": { "types": "./src/shell.ts", "import": "./src/shell.ts" },
+    "./fieldInput": { "types": "./src/fieldInput.ts", "import": "./src/fieldInput.ts" },
     "./terminalLabels": { "types": "./src/terminalLabels.ts", "import": "./src/terminalLabels.ts" }
   },
   "scripts": {

@@ -37,15 +37,45 @@ export function stderrDiagnosticOf(stderr: string): TailscaleStderrDiagnostic | 
   return STDERR_PATTERNS.find(([re]) => re.test(stderr))?.[1] ?? "unknown";
 }
 
+/** Last non-blank stderr lines, for embedding in error messages. */
+function stderrTail(stderr: string, maxLines = 3): string {
+  const lines = stderr
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.slice(-maxLines).join(" | ");
+}
+
+const DIAGNOSTIC_HINTS: Record<Exclude<TailscaleStderrDiagnostic, "unknown">, string> = {
+  "no-existing-handler": "nothing to disable",
+  "not-logged-in": "run `tailscale status` / `tailscale up` and log in first",
+  "permission-denied": "tailscaled rejected the request — check sudo/tailscaled permissions",
+};
+
+/** Human-readable suffix: ` (diagnostic — hint): <stderr tail>`. Empty when stderr is blank. */
+function describeFailure(stderr: string): string {
+  const tail = stderrTail(stderr);
+  const diag = stderrDiagnosticOf(stderr);
+  if (!diag && !tail) return "";
+  if (diag && diag !== "unknown") return ` (${diag} — ${DIAGNOSTIC_HINTS[diag]})${tail ? `: ${tail}` : ""}`;
+  return tail ? `: ${tail}` : "";
+}
+
 export class TailscaleCommandError extends Error {
   override name = "TailscaleCommandError";
+  readonly subcommand: "status" | "serve";
+  readonly exitCode: number | null;
+  readonly stderrDiagnostic?: TailscaleStderrDiagnostic;
   constructor(
     message: string,
-    public readonly subcommand: "status" | "serve",
-    public readonly exitCode: number | null,
-    public readonly stderrDiagnostic?: TailscaleStderrDiagnostic,
+    subcommand: "status" | "serve",
+    exitCode: number | null,
+    stderrDiagnostic?: TailscaleStderrDiagnostic,
   ) {
     super(message);
+    this.subcommand = subcommand;
+    this.exitCode = exitCode;
+    this.stderrDiagnostic = stderrDiagnostic;
   }
 }
 
@@ -125,7 +155,7 @@ export async function readTailscaleStatus(): Promise<TailscaleStatus> {
   const { stdout, stderr, exitCode } = await runCommand(["status", "--json"], TAILSCALE_STATUS_TIMEOUT_MS, "status");
   if (exitCode !== 0) {
     throw new TailscaleCommandError(
-      `tailscale status exited with code ${exitCode}`,
+      `tailscale status exited with code ${exitCode}${describeFailure(stderr)}`,
       "status",
       exitCode,
       stderrDiagnosticOf(stderr),
@@ -153,7 +183,7 @@ export async function ensureTailscaleServe(input: {
   const { stderr, exitCode } = await runCommand(args, TAILSCALE_SERVE_TIMEOUT_MS, "serve");
   if (exitCode !== 0) {
     throw new TailscaleCommandError(
-      `tailscale serve exited with code ${exitCode}`,
+      `tailscale serve exited with code ${exitCode}${describeFailure(stderr)}`,
       "serve",
       exitCode,
       stderrDiagnosticOf(stderr),
@@ -170,7 +200,7 @@ export async function disableTailscaleServe(input: { servePort?: number } = {}):
     // t3code treats no-existing-handler as success on disable
     if (diag === "no-existing-handler") return;
     throw new TailscaleCommandError(
-      `tailscale serve off exited with code ${exitCode}`,
+      `tailscale serve off exited with code ${exitCode}${describeFailure(stderr)}`,
       "serve",
       exitCode,
       diag,

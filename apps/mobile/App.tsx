@@ -352,6 +352,8 @@ function AppInner() {
             servers={catalog.servers}
             activeId={active.id}
             connError={connError}
+            connecting={connecting}
+            live={live}
             onSelect={(s) => void connectTo(s)}
             onForget={forgetServer}
             onAdded={addedServer}

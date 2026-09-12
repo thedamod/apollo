@@ -9,9 +9,9 @@
   "files": ["dist"],
   "scripts": {
     "dev": "tsx watch src/bin.ts --port 7070",
-    "build": "tsc && bun build ./src/bin.ts --outfile ./dist/bundle.js --target node --external node-pty --minify --sourcemap && chmod +x ./dist/bundle.js",
+    "build": "tsc && bun build ./src/bin.ts --outfile ./dist/bundle.js --target node --external node-pty --minify && chmod +x ./dist/bundle.js",
     "build:tsc": "tsc",
-    "bundle": "bun build ./src/bin.ts --outfile ./dist/bundle.js --target node --external node-pty --minify --sourcemap && chmod +x ./dist/bundle.js",
+    "bundle": "bun build ./src/bin.ts --outfile ./dist/bundle.js --target node --external node-pty --minify && chmod +x ./dist/bundle.js",
     "start": "node dist/bundle.js start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

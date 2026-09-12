@@ -79,7 +79,26 @@ async function main(): Promise<void> {
     const cfg = loadOrCreateConfig({ baseDir, port: opts.port ? Number(opts.port) : undefined });
     ensureToken(cfg.tokenPath);
     const pairing = createPairingToken();
-    const connectionString = resolveHeadlessConnectionString(cfg.host, cfg.port);
+    // when --tailscale, prefer the tailnet URL (like `home-server start --tailscale` does)
+    const wantsTailscale = Boolean(opts.tailscale) || process.env.HOME_SERVER_TAILSCALE === "1";
+    let connectionString = resolveHeadlessConnectionString(cfg.host, cfg.port);
+    if (wantsTailscale) {
+      try {
+        const st = await tailscale.readTailscaleStatus();
+        if (st.magicDnsName) {
+          connectionString = tailscale.buildTailscaleHttpsBaseUrl({
+            magicDnsName: st.magicDnsName,
+            servePort: cfg.tailscaleServePort,
+          });
+        } else if (st.tailnetIpv4Addresses[0]) {
+          // fallback to tailnet IP if MagicDNS not set
+          const port = cfg.tailscaleServePort !== 443 ? `:${cfg.tailscaleServePort}` : "";
+          connectionString = `https://${st.tailnetIpv4Addresses[0]}${port}`;
+        }
+      } catch {
+        // fallback to local connection string if tailscale not available
+      }
+    }
     const url = buildPairingUrl(connectionString, pairing);
     console.log(`Connection string: ${connectionString}`);
     console.log(`Pairing URL: ${url}`);
@@ -153,39 +172,52 @@ async function main(): Promise<void> {
   }
 
   await new Promise<void>((resolve, reject) => {
-    server.listen(config.port, config.host, () => {
+    server.listen(config.port, config.host, async () => {
       const addr = server.address() as unknown as { port: number } | string | null;
       const actualPort = typeof addr === "object" && addr !== null && "port" in addr ? (addr as { port: number }).port : config.port;
       writeRuntimeState(actualPort);
       logger.info(`home-server listening`, { host: config.host, port: actualPort });
       const pairing = createPairingToken();
-      const connectionString = resolveHeadlessConnectionString(config.host, actualPort);
-      const pairingUrl = buildPairingUrl(connectionString, pairing);
+
+      // default local connection string
+      let connectionString = resolveHeadlessConnectionString(config.host, actualPort);
+      let pairingUrl = buildPairingUrl(connectionString, pairing);
+      let tailscalePublicUrl: string | null = null;
+
+      // when --tailscale, show the tailnet URL *instead of* 127.0.0.1
+      if (config.tailscaleServeEnabled) {
+        const ok = await tailscale.tryEnsureTailscaleServe({
+          localPort: actualPort,
+          servePort: config.tailscaleServePort,
+        });
+        if (ok) {
+          try {
+            const st = await tailscale.readTailscaleStatus();
+            if (st.magicDnsName) {
+              tailscalePublicUrl = tailscale.buildTailscaleHttpsBaseUrl({
+                magicDnsName: st.magicDnsName,
+                servePort: config.tailscaleServePort,
+              });
+              // use tailnet URL as the primary connection string/pairing URL
+              connectionString = tailscalePublicUrl;
+              pairingUrl = buildPairingUrl(connectionString, pairing);
+              logger.info("Tailscale Serve configured", { localPort: actualPort, servePort: config.tailscaleServePort });
+            } else if (st.tailnetIpv4Addresses[0]) {
+              const portPart = config.tailscaleServePort !== 443 ? `:${config.tailscaleServePort}` : "";
+              tailscalePublicUrl = `https://${st.tailnetIpv4Addresses[0]}${portPart}`;
+              connectionString = tailscalePublicUrl;
+              pairingUrl = buildPairingUrl(connectionString, pairing);
+              logger.info("Tailscale Serve configured (via tailnet IP)", { localPort: actualPort, servePort: config.tailscaleServePort });
+            }
+          } catch {}
+        }
+      }
+
       console.log(`\n  home-server ready`);
       console.log(`  Connection string: ${connectionString}`);
       console.log(`  Pairing URL: ${pairingUrl}`);
       console.log(`  token: ${token.slice(0, 8)}... (use 'home-server token' to print full)`);
-      console.log(`  health: ${connectionString}/health\n`);
-
-      // tailscale serve (like t3code:300:apps/server/src/server.ts:559)
-      if (config.tailscaleServeEnabled) {
-        tailscale
-          .tryEnsureTailscaleServe({ localPort: actualPort, servePort: config.tailscaleServePort })
-          .then(async (ok) => {
-            if (!ok) return;
-            logger.info("Tailscale Serve configured", { localPort: actualPort, servePort: config.tailscaleServePort });
-            try {
-              const st = await tailscale.readTailscaleStatus();
-              if (st.magicDnsName) {
-                const publicUrl = tailscale.buildTailscaleHttpsBaseUrl({
-                  magicDnsName: st.magicDnsName,
-                  servePort: config.tailscaleServePort,
-                });
-                console.log(`  tailscale: ${publicUrl}  (use this https URL in the mobile app)`);
-              }
-            } catch {}
-          });
-      }
+      console.log(`  health: ${connectionString.replace(/\/$/, "")}/health\n`);
 
       resolve();
     });

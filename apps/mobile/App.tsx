@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Keyboard, StatusBar, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
+import { ActivityIndicator, BackHandler, Keyboard, StatusBar, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import * as Font from "expo-font";
 import { DMSans_400Regular, DMSans_500Medium, DMSans_700Bold } from "@expo-google-fonts/dm-sans";
@@ -24,6 +24,7 @@ import { TerminalScreen } from "./src/screens/Terminal";
 import { AppearanceSettingsScreen } from "./src/screens/AppearanceSettings";
 import { EnvironmentsScreen } from "./src/screens/Environments";
 import { SettingsBackHeader, SettingsScreen, type SettingsRoute } from "./src/screens/Settings";
+import { handleBackPress, pushBackHandler } from "./src/lib/backPress";
 
 const HISTORY_LEN = 24;
 // t3code-style supervisor backoff: 1s, 2s, 4s … capped at 30s
@@ -63,6 +64,50 @@ function AppInner() {
   const desiredRef = useRef<ServerEntry | null>(null);
   const backoffRef = useRef(0);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // System back (hardware key + Android edge-swipe gesture) navigation:
+  // sheets/modals sit on top of this fallback via pushBackHandler.
+  const tabRef = useRef<TabKey>(tab);
+  tabRef.current = tab;
+  const settingsRouteRef = useRef<SettingsRoute>(settingsRoute);
+  settingsRouteRef.current = settingsRoute;
+  const tabHistoryRef = useRef<TabKey[]>(["home"]);
+
+  const navigateTab = useCallback((t: TabKey) => {
+    if (t !== "settings") setSettingsRoute("main");
+    setTab(t);
+    const hist = tabHistoryRef.current;
+    if (hist[hist.length - 1] !== t) {
+      tabHistoryRef.current = [...hist, t].slice(-20);
+    }
+  }, []);
+
+  useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => handleBackPress());
+    return () => sub.remove();
+  }, []);
+
+  useEffect(() => {
+    // Fallback = bottom of the stack: settings sub-screen → previous tab → OS default (exit).
+    return pushBackHandler(() => {
+      if (keyboardOpenRef.current) {
+        Keyboard.dismiss();
+        return true;
+      }
+      if (tabRef.current === "settings" && settingsRouteRef.current !== "main") {
+        setSettingsRoute("main");
+        return true;
+      }
+      const hist = tabHistoryRef.current;
+      if (hist.length > 1) {
+        hist.pop();
+        const prev = hist[hist.length - 1];
+        if (prev !== "settings") setSettingsRoute("main");
+        setTab(prev);
+        return true;
+      }
+      return false;
+    });
+  }, []);
 
   useEffect(() => {
     Font.loadAsync({ "DMSans-Regular": DMSans_400Regular, "DMSans-Medium": DMSans_500Medium, "DMSans-Bold": DMSans_700Bold })
@@ -254,6 +299,7 @@ function AppInner() {
     setClient(null);
     setActive(null);
     setLive(false);
+    tabHistoryRef.current = ["home"];
     setTab("home");
     setSettingsRoute("main");
   }, []);
@@ -390,7 +436,7 @@ function AppInner() {
           </View>
         ) : null}
         {tab === "home" ? (
-          <HomeScreen data={{ ...home, tailscaleIp }} hostLabel={hostLabel} onViewDetails={() => { setSettingsRoute("main"); setTab("settings"); }} />
+          <HomeScreen data={{ ...home, tailscaleIp }} hostLabel={hostLabel} onViewDetails={() => navigateTab("settings")} />
         ) : tab === "files" ? (
           <FilesScreen client={client} />
         ) : tab === "terminal" ? (
@@ -404,7 +450,7 @@ function AppInner() {
         )}
       </View>
       {keyboardOpen ? null : (
-        <TabBar active={tab} onChange={(t) => { if (t !== "settings") setSettingsRoute("main"); setTab(t); }} />
+        <TabBar active={tab} onChange={navigateTab} />
       )}
     </SafeAreaView>
   );

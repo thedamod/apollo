@@ -46,6 +46,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SvgUri } from "react-native-svg";
 import { theme } from "../theme";
 import type { RpcClient } from "../lib/client";
+import { pushBackHandler } from "../lib/backPress";
 import { formatBytes } from "../lib/format";
 import {
   authHeaders,
@@ -89,6 +90,12 @@ export function FilesScreen({ client }: { client: RpcClient | null }) {
   const [detailsTarget, setDetailsTarget] = useState<ExplorerEntry | null>(null);
   const [mutating, setMutating] = useState(false);
   const [uploading, setUploading] = useState<string | null>(null);
+
+  // System back / edge-swipe: close the topmost dialog first, then walk up
+  // one folder; return false at the root so tab-history navigation runs.
+  // (Registered after `browse`/`openEntry` below — the handler reads refs.)
+  const backState = useRef({ actionTarget, previewTarget, mkdirOpen, renameTarget, deleteTarget, detailsTarget, path });
+  backState.current = { actionTarget, previewTarget, mkdirOpen, renameTarget, deleteTarget, detailsTarget, path };
 
   const profile = client?.profileSnapshot ?? null;
 
@@ -141,6 +148,22 @@ export function FilesScreen({ client }: { client: RpcClient | null }) {
     },
     [browse],
   );
+
+  const browseRef = useRef(browse);
+  browseRef.current = browse;
+  useEffect(() => {
+    return pushBackHandler(() => {
+      const s = backState.current;
+      if (s.deleteTarget) { setDeleteTarget(null); return true; }
+      if (s.detailsTarget) { setDetailsTarget(null); return true; }
+      if (s.renameTarget) { setRenameTarget(null); return true; }
+      if (s.mkdirOpen) { setMkdirOpen(false); return true; }
+      if (s.previewTarget) { setPreviewTarget(null); return true; }
+      if (s.actionTarget) { setActionTarget(null); return true; }
+      if (s.path) { void browseRef.current(parentOf(s.path)); return true; }
+      return false;
+    });
+  }, []);
 
   // -- mutations -----------------------------------------------------------
 

@@ -5,6 +5,7 @@ import { Picker } from "@react-native-picker/picker";
 import ColorPicker, { HueSlider, Panel1, Preview } from "reanimated-color-picker";
 import { ChevronDown, FolderOpen, Minus, Plus } from "lucide-react-native";
 import { theme } from "../../theme";
+import { useBackPress } from "../../lib/backPress";
 import type { ParamValues, ScriptParam } from "./params";
 import { serializeParamValue } from "./params";
 
@@ -212,6 +213,10 @@ function SelectField({
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(value);
+  useBackPress(open, () => {
+    setOpen(false);
+    return true;
+  });
   return (
     <View>
       <Text style={styles.label}>{param.label}</Text>
@@ -262,6 +267,10 @@ function ColorField({
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(value);
+  useBackPress(open, () => {
+    setOpen(false);
+    return true;
+  });
   return (
     <View>
       <Text style={styles.label}>{param.label}</Text>

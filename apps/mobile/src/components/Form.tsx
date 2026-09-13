@@ -2,6 +2,7 @@ import React from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { X } from "lucide-react-native";
 import { theme } from "../theme";
+import { useBackPress } from "../lib/backPress";
 
 /**
  * Shared creation-flow primitives: bottom sheet + compact fields.
@@ -21,6 +22,13 @@ export function Sheet({
   onClose: () => void;
   children: React.ReactNode;
 }) {
+  // Close the topmost sheet on system back / edge-swipe before tab navigation runs.
+  const onCloseRef = React.useRef(onClose);
+  onCloseRef.current = onClose;
+  useBackPress(visible, () => {
+    onCloseRef.current();
+    return true;
+  });
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <View style={styles.overlay}>

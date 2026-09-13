@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Play } from "lucide-react-native";
 import { theme } from "../../theme";
 import type { RpcClient } from "../../lib/client";
@@ -57,6 +57,7 @@ export function ScriptRunSheet({
   const [history, setHistory] = useState<RunRow[]>([]);
   const [historyBusy, setHistoryBusy] = useState(false);
   const runIdRef = useRef<string | null>(null);
+  const logScrollRef = useRef<ScrollView | null>(null);
 
   const params = script?.params ?? [];
 
@@ -191,7 +192,20 @@ export function ScriptRunSheet({
       {output ? (
         <View>
           <Text style={styles.section}>Output</Text>
-          <TextInput value={output} multiline editable={false} style={styles.log} />
+          {/* Inner scroll window: the outer Sheet already scrolls, so the log
+              gets its own capped viewport (nestedScrollEnabled for Android)
+              and tails new output while a run streams. */}
+          <ScrollView
+            ref={logScrollRef}
+            style={styles.logBox}
+            nestedScrollEnabled
+            showsVerticalScrollIndicator
+            onContentSizeChange={() => logScrollRef.current?.scrollToEnd({ animated: false })}
+          >
+            <Text selectable style={styles.logText}>
+              {output}
+            </Text>
+          </ScrollView>
         </View>
       ) : null}
       <View>
@@ -227,7 +241,14 @@ const styles = StyleSheet.create({
   status: { color: theme.colors.foreground, fontSize: 14, fontFamily: theme.font.medium },
   error: { color: theme.colors.danger, fontFamily: theme.font.regular, fontSize: 13 },
   section: { color: theme.colors.secondary, fontSize: 13, fontFamily: theme.font.medium, marginBottom: 6 },
-  log: { color: theme.colors.foreground, fontFamily: theme.font.regular, fontSize: 12, minHeight: 120, backgroundColor: theme.colors.cardAlt, borderRadius: 12, padding: 10 },
+  logBox: {
+    backgroundColor: theme.colors.cardAlt,
+    borderRadius: 12,
+    padding: 10,
+    minHeight: 120,
+    maxHeight: 320,
+  },
+  logText: { color: theme.colors.foreground, fontFamily: theme.font.regular, fontSize: 12 },
   histRow: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: theme.colors.cardAlt, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 9 },
   histText: { color: theme.colors.secondary, fontSize: 12, fontFamily: theme.font.regular },
 });

@@ -12,7 +12,6 @@ export interface RunnableScript {
   id: string;
   name: string;
   description?: string;
-  icon?: string;
   command: string;
   params?: ScriptParam[];
 }
@@ -163,7 +162,7 @@ export function ScriptRunSheet({
   return (
     <Sheet
       visible={script !== null}
-      title={script ? `${script.icon ? `${script.icon} ` : ""}${script.name}` : ""}
+      title={script ? script.name : ""}
       stepLabel={script?.description || undefined}
       onClose={onClose}
     >

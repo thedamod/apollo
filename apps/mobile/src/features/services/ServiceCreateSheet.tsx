@@ -2,9 +2,7 @@ import React, { useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { theme } from "../../theme";
 import type { RpcClient } from "../../lib/client";
-import { ChipRow, EnvEditor, Segmented, Sheet, TextField, ToggleRow, WizardNav, slugify } from "../../components/Form";
-
-const ICONS = ["", "🎬", "📻", "🐳", "📦", "🌐", "💾", "⚙️"];
+import { EnvEditor, Segmented, Sheet, TextField, ToggleRow, WizardNav, slugify } from "../../components/Form";
 
 type Kind = "systemd" | "docker" | "custom";
 type Health = "auto" | "process" | "port" | "http";
@@ -52,7 +50,6 @@ export function ServiceCreateSheet({
   const [pickedContainer, setPickedContainer] = useState<ContainerRow | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [icon, setIcon] = useState("");
   const [command, setCommand] = useState("");
   const [cwd, setCwd] = useState("");
   const [env, setEnv] = useState<Record<string, string>>({});
@@ -82,7 +79,6 @@ export function ServiceCreateSheet({
     setPickedContainer(null);
     setName("");
     setDescription("");
-    setIcon("");
     setCommand("");
     setCwd("");
     setEnv({});
@@ -163,7 +159,6 @@ export function ServiceCreateSheet({
         id: slugify(name, `svc_${Date.now().toString(36)}`),
         name: name.trim(),
         description: description.trim() || undefined,
-        icon: icon || undefined,
         env: Object.keys(env).length > 0 ? env : undefined,
         port: portNum,
         autoRestart,
@@ -255,7 +250,6 @@ export function ServiceCreateSheet({
         <>
           <TextField label="Name" value={name} onChange={setName} placeholder="Jellyfin" autoCapitalize="words" />
           <TextField label="Description" value={description} onChange={setDescription} placeholder="Media server (optional)" autoCapitalize="sentences" />
-          <ChipRow label="Icon" options={ICONS} value={icon} onChange={setIcon} />
           {kind === "custom" ? (
             <TextField label="Command" value={command} onChange={setCommand} placeholder="python3 -m http.server 8000" hint="Runs in a shell on the server." multiline />
           ) : null}

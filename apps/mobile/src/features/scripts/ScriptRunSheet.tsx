@@ -164,7 +164,12 @@ export function ScriptRunSheet({
       await client.call("widgets.upsert", { name, scriptId: script.id, params: values });
       setWidgetSaved(true);
     } catch (e) {
-      setRunError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setRunError(
+        /unknown method/i.test(msg)
+          ? "Home shortcuts need a newer server — rebuild and restart the daemon, then try again."
+          : msg,
+      );
     } finally {
       setWidgetBusy(false);
     }

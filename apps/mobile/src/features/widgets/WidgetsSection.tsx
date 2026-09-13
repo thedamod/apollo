@@ -17,6 +17,12 @@ interface ScriptDef {
   name: string;
 }
 
+/** The connected server predates the widgets RPC — hide, don't error. */
+function isUnknownMethodError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /unknown method/i.test(msg);
+}
+
 /**
  * Home-tab widgets — one-tap script shortcuts with preset parameter values
  * (e.g. "Dim lights" runs Room Lighting with `{ brightness: 50 }`).
@@ -29,6 +35,7 @@ export function WidgetsSection({ client }: { client: RpcClient | null }) {
   const [runningId, setRunningId] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [unsupported, setUnsupported] = useState(false);
   const runIdRef = useRef<string | null>(null);
   runIdRef.current = runId;
 
@@ -45,8 +52,15 @@ export function WidgetsSection({ client }: { client: RpcClient | null }) {
       const names: Record<string, string> = {};
       if (Array.isArray(scripts)) for (const s of scripts) names[s.id] = s.name;
       setScriptNames(names);
+      setUnsupported(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (isUnknownMethodError(e)) {
+        // server predates widgets — hide the section until the daemon is updated
+        setUnsupported(true);
+        setError(null);
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setBusy(false);
     }
@@ -70,7 +84,7 @@ export function WidgetsSection({ client }: { client: RpcClient | null }) {
     });
   }, [client]);
 
-  if (!client) return null;
+  if (!client || unsupported) return null;
 
   async function runWidget(w: HomeWidget) {
     if (runningId) return;

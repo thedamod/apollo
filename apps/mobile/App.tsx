@@ -436,7 +436,7 @@ function AppInner() {
           </View>
         ) : null}
         {tab === "home" ? (
-          <HomeScreen data={{ ...home, tailscaleIp }} hostLabel={hostLabel} onViewDetails={() => navigateTab("settings")} />
+          <HomeScreen data={{ ...home, tailscaleIp }} hostLabel={hostLabel} onViewDetails={() => navigateTab("settings")} client={client} />
         ) : tab === "files" ? (
           <FilesScreen client={client} />
         ) : tab === "terminal" ? (

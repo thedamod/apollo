@@ -14,9 +14,11 @@ import {
 } from "lucide-react-native";
 import { theme } from "../theme";
 import { formatBytes, formatUptimeShort, greetingFor } from "../lib/format";
+import type { RpcClient } from "../lib/client";
 import { Card } from "../components/Card";
 import { StatTile } from "../components/StatTile";
 import { type ActivityItem } from "../components/ActivityList";
+import { WidgetsSection } from "../features/widgets/WidgetsSection";
 
 export interface HomeData {
   serverName: string;
@@ -83,11 +85,13 @@ export function HomeScreen({
   data,
   userName = "Aether",
   onViewDetails,
+  client,
 }: {
   data: HomeData;
   hostLabel: string;
   userName?: string;
   onViewDetails?: () => void;
+  client?: RpcClient | null;
 }) {
   return (
     <ScrollView style={styles.root} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -152,6 +156,7 @@ export function HomeScreen({
           history={data.uptimeHistory}
         />
       </View>
+      <WidgetsSection client={client ?? null} />
     </ScrollView>
   );
 }

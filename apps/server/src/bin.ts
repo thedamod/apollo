@@ -12,15 +12,18 @@ import { registerFilesystemHandlers } from "./rpc/handlers/filesystem.ts";
 import { registerTerminalHandlers } from "./rpc/handlers/terminal.ts";
 import { registerSystemHandlers } from "./rpc/handlers/system.ts";
 import { registerScriptHandlers } from "./rpc/handlers/scripts.ts";
+import { registerWidgetHandlers } from "./rpc/handlers/widgets.ts";
 import { registerServiceHandlers } from "./rpc/handlers/services.ts";
 import { registerTunnelHandlers } from "./rpc/handlers/tunnel.ts";
 import { registerMetaHandlers } from "./rpc/handlers/meta.ts";
 import { FilesystemService } from "./services/filesystem.ts";
 import { SystemService } from "./services/system.ts";
 import { ScriptService } from "./services/scripts.ts";
+import { WidgetService } from "./services/widgets.ts";
 import { ServiceManager } from "./services/serviceManager.ts";
 import { TunnelService } from "./services/tunnel.ts";
 import { TerminalManager } from "./services/terminal/manager.ts";
+import { renderTerminalQrCode } from "@home-server/shared/qrTerminal";
 import * as tailscale from "@home-server/tailscale";
 
 function printHelp(): void {
@@ -103,6 +106,12 @@ async function main(): Promise<void> {
     console.log(`Connection string: ${connectionString}`);
     console.log(`Pairing URL: ${url}`);
     console.log(url);
+    try {
+      console.log("");
+      console.log(renderTerminalQrCode(url));
+      console.log("");
+      console.log("Scan the QR code above with the mobile app (Add environment → Scan) to pair.");
+    } catch {}
     return;
   }
 
@@ -129,6 +138,8 @@ async function main(): Promise<void> {
     timerCallback: { port: config.port, tokenPath: config.tokenPath },
   });
   await scriptService.init();
+  const widgetService = new WidgetService(config.widgetsPath, scriptService);
+  await widgetService.init();
   const serviceManager = new ServiceManager(config.servicesPath, config.logsDir);
   await serviceManager.init();
   const terminalManager = new TerminalManager(config.terminalLogsDir);
@@ -142,6 +153,7 @@ async function main(): Promise<void> {
   registerTerminalHandlers(registry, terminalManager);
   registerSystemHandlers(registry, systemService);
   registerScriptHandlers(registry, scriptService);
+  registerWidgetHandlers(registry, widgetService);
   registerServiceHandlers(registry, serviceManager);
   registerTunnelHandlers(registry, tunnelService);
 
@@ -218,6 +230,11 @@ async function main(): Promise<void> {
       console.log(`  Pairing URL: ${pairingUrl}`);
       console.log(`  token: ${token.slice(0, 8)}... (use 'home-server token' to print full)`);
       console.log(`  health: ${connectionString.replace(/\/$/, "")}/health\n`);
+      try {
+        console.log(renderTerminalQrCode(pairingUrl));
+        console.log("");
+        console.log("  Scan the QR code above with the mobile app (Add environment → Scan) to pair.\n");
+      } catch {}
 
       resolve();
     });

@@ -16,6 +16,7 @@ export interface ServerConfig {
   logsDir: string;
   terminalLogsDir: string;
   scriptsPath: string;
+  widgetsPath: string;
   servicesPath: string;
   tokenPath: string;
   runtimeStatePath: string;
@@ -30,6 +31,7 @@ export interface DerivedPaths {
   logsDir: string;
   terminalLogsDir: string;
   scriptsPath: string;
+  widgetsPath: string;
   servicesPath: string;
   tokenPath: string;
   runtimeStatePath: string;
@@ -44,6 +46,7 @@ export function derivePaths(baseDir: string): DerivedPaths {
     logsDir,
     terminalLogsDir: path.join(logsDir, "terminals"),
     scriptsPath: path.join(dataDir, "scripts.json"),
+    widgetsPath: path.join(dataDir, "widgets.json"),
     servicesPath: path.join(dataDir, "services.json"),
     tokenPath: path.join(dataDir, "secrets", "token"),
     runtimeStatePath: path.join(dataDir, "server-runtime.json"),
@@ -85,6 +88,7 @@ export function loadOrCreateConfig(opts: {
     logsDir: d.logsDir,
     terminalLogsDir: d.terminalLogsDir,
     scriptsPath: d.scriptsPath,
+    widgetsPath: d.widgetsPath,
     servicesPath: d.servicesPath,
     tokenPath: d.tokenPath,
     runtimeStatePath: d.runtimeStatePath,
@@ -147,6 +151,7 @@ export function loadOrCreateConfigEffect(
       logsDir: d.logsDir,
       terminalLogsDir: d.terminalLogsDir,
       scriptsPath: d.scriptsPath,
+      widgetsPath: d.widgetsPath,
       servicesPath: d.servicesPath,
       tokenPath: d.tokenPath,
       runtimeStatePath: d.runtimeStatePath,

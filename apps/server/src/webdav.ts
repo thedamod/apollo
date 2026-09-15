@@ -623,7 +623,7 @@ export function createWebDavRouter(opts: {
     if (depth >= maxDepth || budget.left <= 0) return [];
     let listing: { entries: { name: string }[] };
     try {
-      listing = await fss.browse({ path: dirAbs, includeHidden: true, limit: 5000 });
+      listing = await fss.browse({ path: dirAbs, includeHidden: true, limit: 5000, offset: 0 });
     } catch {
       return [];
     }

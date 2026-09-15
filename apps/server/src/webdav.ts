@@ -46,14 +46,23 @@ export function ensureWebDavShareDirs(shares: WebDavShare[]): void {
     try {
       fs.mkdirSync(s.path, { recursive: true });
     } catch (e) {
-      logger.warn(`[webdav] could not create share dir ${s.name}`, { error: (e as Error).message });
+      logger.warn(`[webdav] could not create share dir ${s.name}`, {
+        error: (e as Error).message,
+      });
     }
   }
 }
 
 function unauthorized(res: express.Response): void {
   res.setHeader("WWW-Authenticate", `Basic realm="${DAV_REALM}"`);
-  res.status(401).json({ error: { code: "unauthorized", message: "Valid Bearer token, Basic password, or ?token= required" } });
+  res
+    .status(401)
+    .json({
+      error: {
+        code: "unauthorized",
+        message: "Valid Bearer token, Basic password, or ?token= required",
+      },
+    });
 }
 
 /** Bearer token, Basic (username ignored, password is the token), or ?token= fallback. */
@@ -63,7 +72,9 @@ export function verifyDavAuth(req: express.Request, expected: string): boolean {
     if (hdr.startsWith("Bearer ")) return verifyToken(hdr, expected);
     if (hdr.startsWith("Basic ")) {
       try {
-        const decoded = Buffer.from(hdr.slice(6).trim(), "base64").toString("utf8");
+        const decoded = Buffer.from(hdr.slice(6).trim(), "base64").toString(
+          "utf8",
+        );
         const password = decoded.slice(decoded.indexOf(":") + 1);
         return verifyToken(password, expected);
       } catch {
@@ -78,7 +89,11 @@ export function verifyDavAuth(req: express.Request, expected: string): boolean {
 }
 
 function escapeXml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function etagFor(size: number, mtimeMs: number): string {
@@ -96,7 +111,11 @@ interface DavResource {
   etag: string;
 }
 
-function toResource(href: string, displayName: string, opts: Partial<DavResource> & { isCollection: boolean }): DavResource {
+function toResource(
+  href: string,
+  displayName: string,
+  opts: Partial<DavResource> & { isCollection: boolean },
+): DavResource {
   const mtimeMs = opts.mtimeMs ?? Date.now();
   const size = opts.size ?? 0;
   return {
@@ -106,7 +125,9 @@ function toResource(href: string, displayName: string, opts: Partial<DavResource
     size,
     mtimeMs,
     birthtimeMs: opts.birthtimeMs ?? mtimeMs,
-    contentType: opts.contentType ?? (opts.isCollection ? "httpd/unix-directory" : "application/octet-stream"),
+    contentType:
+      opts.contentType ??
+      (opts.isCollection ? "httpd/unix-directory" : "application/octet-stream"),
     etag: opts.etag ?? etagFor(size, mtimeMs),
   };
 }
@@ -124,7 +145,9 @@ function resourceXml(r: DavResource): string {
     props.push(`<D:getcontenttype>httpd/unix-directory</D:getcontenttype>`);
   } else {
     props.push(`<D:getcontentlength>${r.size}</D:getcontentlength>`);
-    props.push(`<D:getcontenttype>${escapeXml(r.contentType)}</D:getcontenttype>`);
+    props.push(
+      `<D:getcontenttype>${escapeXml(r.contentType)}</D:getcontenttype>`,
+    );
   }
   return (
     `<D:response><D:href>${escapeXml(r.href)}</D:href>` +
@@ -141,16 +164,27 @@ export function multistatusXml(resources: DavResource[]): string {
 }
 
 /** Split a router-relative path ("/media/a/b") into share + sub-path. */
-function splitDavPath(rel: string): { shareName: string; subPath: string } | null {
+function splitDavPath(
+  rel: string,
+): { shareName: string; subPath: string } | null {
   const trimmed = rel.replace(/^\/+/, "").replace(/\/+$/, "");
   if (!trimmed) return null;
   const slash = trimmed.indexOf("/");
   if (slash < 0) return { shareName: trimmed, subPath: "" };
-  return { shareName: trimmed.slice(0, slash), subPath: trimmed.slice(slash + 1) };
+  return {
+    shareName: trimmed.slice(0, slash),
+    subPath: trimmed.slice(slash + 1),
+  };
 }
 
-function davHref(shareName: string, subPath: string, isCollection: boolean): string {
-  const segs = [shareName, ...subPath.split("/").filter(Boolean)].map(encodeURIComponent);
+function davHref(
+  shareName: string,
+  subPath: string,
+  isCollection: boolean,
+): string {
+  const segs = [shareName, ...subPath.split("/").filter(Boolean)].map(
+    encodeURIComponent,
+  );
   const href = `/dav/${segs.join("/")}`;
   return isCollection ? `${href}/` : href;
 }
@@ -172,7 +206,9 @@ async function confinedAbs(root: string, abs: string): Promise<boolean> {
 }
 
 /** Parse a Destination header (absolute URL or /dav/... path) into share + sub-path. */
-export function parseDestination(dest: string | undefined): { shareName: string; subPath: string } | null {
+export function parseDestination(
+  dest: string | undefined,
+): { shareName: string; subPath: string } | null {
   if (!dest) return null;
   let p = dest.trim();
   try {
@@ -185,27 +221,43 @@ export function parseDestination(dest: string | undefined): { shareName: string;
   return splitDavPath(p.slice(4) || "/");
 }
 
-async function readBody(req: express.Request, limit = 1024 * 1024): Promise<Buffer> {
+async function readBody(
+  req: express.Request,
+  limit = 1024 * 1024,
+): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as unknown as string);
+    const buf = Buffer.isBuffer(chunk)
+      ? chunk
+      : Buffer.from(chunk as unknown as string);
     total += buf.length;
-    if (total > limit) throw Object.assign(new Error("request body too large"), { code: "too_large" });
+    if (total > limit)
+      throw Object.assign(new Error("request body too large"), {
+        code: "too_large",
+      });
     chunks.push(buf);
   }
   return Buffer.concat(chunks);
 }
 
 /** Stream a file with inline disposition + Range support (mirrors sendFile in http.ts). */
-async function sendDavFile(req: express.Request, res: express.Response, target: string, stat: fs.Stats): Promise<void> {
+async function sendDavFile(
+  req: express.Request,
+  res: express.Response,
+  target: string,
+  stat: fs.Stats,
+): Promise<void> {
   const name = path.basename(target);
   const ext = extOf(name);
   const contentType = ext ? mimeHintFromExt(ext) : "application/octet-stream";
   const total = stat.size;
   res.setHeader("Content-Type", contentType);
   res.setHeader("Accept-Ranges", "bytes");
-  res.setHeader("Content-Disposition", `inline; filename="${name.replace(/"/g, "")}"`);
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename="${name.replace(/"/g, "")}"`,
+  );
   res.setHeader("Last-Modified", stat.mtime.toUTCString());
   res.setHeader("ETag", etagFor(total, stat.mtimeMs));
   if (req.method === "HEAD") {
@@ -219,7 +271,12 @@ async function sendDavFile(req: express.Request, res: express.Response, target: 
     if (m) {
       const start = m[1] ? Number(m[1]) : 0;
       const end = m[2] ? Number(m[2]) : total - 1;
-      if (Number.isFinite(start) && Number.isFinite(end) && start <= end && start < total) {
+      if (
+        Number.isFinite(start) &&
+        Number.isFinite(end) &&
+        start <= end &&
+        start < total
+      ) {
         const clampedEnd = Math.min(end, total - 1);
         res.status(206);
         res.setHeader("Content-Range", `bytes ${start}-${clampedEnd}/${total}`);
@@ -264,12 +321,22 @@ export function createWebDavRouter(opts: {
     } catch (e) {
       const err = e as { code?: string; message?: string };
       if (!res.headersSent) {
-        res.status(500).json({ error: { code: err.code ?? "unknown", message: err.message ?? String(e) } });
+        res
+          .status(500)
+          .json({
+            error: {
+              code: err.code ?? "unknown",
+              message: err.message ?? String(e),
+            },
+          });
       }
     }
   });
 
-  async function handleDav(req: express.Request, res: express.Response): Promise<void> {
+  async function handleDav(
+    req: express.Request,
+    res: express.Response,
+  ): Promise<void> {
     const method = req.method.toUpperCase();
     const rel = req.path || "/";
     const shares = opts.getShares();
@@ -278,7 +345,9 @@ export function createWebDavRouter(opts: {
     // Service root: virtual collection of shares
     if (rel === "/" || rel === "") {
       if (method === "PROPFIND") {
-        const depth = (req.headers.depth as string | undefined ?? "1").trim().toLowerCase();
+        const depth = ((req.headers.depth as string | undefined) ?? "1")
+          .trim()
+          .toLowerCase();
         if (!["0", "1", "infinity"].includes(depth)) {
           res.status(400).end();
           return;
@@ -292,18 +361,36 @@ export function createWebDavRouter(opts: {
             try {
               mtime = (await fsp.stat(s.path)).mtimeMs;
             } catch {}
-            resources.push(toResource(`/dav/${encodeURIComponent(s.name)}/`, s.name, { isCollection: true, mtimeMs: mtime }));
+            resources.push(
+              toResource(`/dav/${encodeURIComponent(s.name)}/`, s.name, {
+                isCollection: true,
+                mtimeMs: mtime,
+              }),
+            );
           }
         }
-        res.status(207).setHeader("Content-Type", "application/xml; charset=utf-8").send(multistatusXml(resources));
+        res
+          .status(207)
+          .setHeader("Content-Type", "application/xml; charset=utf-8")
+          .send(multistatusXml(resources));
         return;
       }
       if (method === "GET" || method === "HEAD") {
-        res.status(403).json({ error: { code: "permission_denied", message: "refusing to serve /dav itself as a file" } });
+        res
+          .status(403)
+          .json({
+            error: {
+              code: "permission_denied",
+              message: "refusing to serve /dav itself as a file",
+            },
+          });
         return;
       }
       if (method === "PROPPATCH") {
-        res.status(207).setHeader("Content-Type", "application/xml; charset=utf-8").send(multistatusXml([]));
+        res
+          .status(207)
+          .setHeader("Content-Type", "application/xml; charset=utf-8")
+          .send(multistatusXml([]));
         return;
       }
       if (method === "LOCK") return fakeLock(req, res, "/dav/");
@@ -318,22 +405,36 @@ export function createWebDavRouter(opts: {
     const split = splitDavPath(rel);
     const share = split ? byName.get(split.shareName) : undefined;
     if (!split || !share) {
-      res.status(404).json({ error: { code: "not_found", message: `No such share: ${rel}` } });
+      res
+        .status(404)
+        .json({
+          error: { code: "not_found", message: `No such share: ${rel}` },
+        });
       return;
     }
     let abs: string;
     try {
       abs = resolveSharePath(share.path, split.subPath);
     } catch {
-      res.status(403).json({ error: { code: "permission_denied", message: "path escapes share root" } });
+      res
+        .status(403)
+        .json({
+          error: {
+            code: "permission_denied",
+            message: "path escapes share root",
+          },
+        });
       return;
     }
-    const hrefBase = (sub: string, isCol: boolean) => davHref(share.name, sub, isCol);
+    const hrefBase = (sub: string, isCol: boolean) =>
+      davHref(share.name, sub, isCol);
     const relSub = split.subPath;
 
     switch (method) {
       case "PROPFIND": {
-        const depth = ((req.headers.depth as string | undefined) ?? "infinity").trim().toLowerCase();
+        const depth = ((req.headers.depth as string | undefined) ?? "infinity")
+          .trim()
+          .toLowerCase();
         if (!["0", "1", "infinity"].includes(depth)) {
           res.status(400).end();
           return;
@@ -344,12 +445,24 @@ export function createWebDavRouter(opts: {
           res.status(404).json({ error: { code: "not_found", message: rel } });
           return;
         }
-        const resources: DavResource[] = [await statResource(abs, relSub, hrefBase, lst, share.path)];
+        const resources: DavResource[] = [
+          await statResource(abs, relSub, hrefBase, lst, share.path),
+        ];
         if (depth !== "0" && resources[0].isCollection) {
-          const kids = await collectChildren(abs, relSub, hrefBase, share.path, depth === "infinity" ? Infinity : 1, 0);
+          const kids = await collectChildren(
+            abs,
+            relSub,
+            hrefBase,
+            share.path,
+            depth === "infinity" ? Infinity : 1,
+            0,
+          );
           resources.push(...kids);
         }
-        res.status(207).setHeader("Content-Type", "application/xml; charset=utf-8").send(multistatusXml(resources));
+        res
+          .status(207)
+          .setHeader("Content-Type", "application/xml; charset=utf-8")
+          .send(multistatusXml(resources));
         return;
       }
       case "GET":
@@ -360,16 +473,37 @@ export function createWebDavRouter(opts: {
           return;
         }
         if (lst.isDirectory() && !lst.isSymbolicLink()) {
-          res.status(403).json({ error: { code: "permission_denied", message: `refusing to serve collection as a file: ${rel}` } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: `refusing to serve collection as a file: ${rel}`,
+              },
+            });
           return;
         }
         if (!(await confinedAbs(share.path, abs))) {
-          res.status(403).json({ error: { code: "permission_denied", message: "symlink target outside share" } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: "symlink target outside share",
+              },
+            });
           return;
         }
         const st = await fsp.stat(abs).catch(() => null);
         if (!st || st.isDirectory()) {
-          res.status(403).json({ error: { code: "permission_denied", message: `refusing to serve collection as a file: ${rel}` } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: `refusing to serve collection as a file: ${rel}`,
+              },
+            });
           return;
         }
         await sendDavFile(req, res, abs, st);
@@ -377,16 +511,37 @@ export function createWebDavRouter(opts: {
       }
       case "PUT": {
         if (share.readOnly) {
-          res.status(403).json({ error: { code: "permission_denied", message: `share ${share.name} is read-only` } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: `share ${share.name} is read-only`,
+              },
+            });
           return;
         }
         const lst = await fsp.lstat(abs).catch(() => null);
         if (lst?.isDirectory() && !lst.isSymbolicLink()) {
-          res.status(403).json({ error: { code: "permission_denied", message: `target is a collection: ${rel}` } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: `target is a collection: ${rel}`,
+              },
+            });
           return;
         }
         if (!(await confinedAbs(share.path, abs))) {
-          res.status(403).json({ error: { code: "permission_denied", message: "symlink target outside share" } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: "symlink target outside share",
+              },
+            });
           return;
         }
         const existed = !!lst;
@@ -394,12 +549,18 @@ export function createWebDavRouter(opts: {
           await fsp.mkdir(path.dirname(abs), { recursive: true });
           await pipeline(req, fs.createWriteStream(abs));
         } catch (e) {
-          res.status(403).json({ error: { code: "permission_denied", message: String(e) } });
+          res
+            .status(403)
+            .json({ error: { code: "permission_denied", message: String(e) } });
           return;
         }
         const st = await fsp.stat(abs).catch(() => null);
         if (!st) {
-          res.status(403).json({ error: { code: "permission_denied", message: "write failed" } });
+          res
+            .status(403)
+            .json({
+              error: { code: "permission_denied", message: "write failed" },
+            });
           return;
         }
         res.setHeader("ETag", etagFor(st.size, st.mtimeMs));
@@ -408,19 +569,35 @@ export function createWebDavRouter(opts: {
       }
       case "MKCOL": {
         if (share.readOnly) {
-          res.status(403).json({ error: { code: "permission_denied", message: `share ${share.name} is read-only` } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: `share ${share.name} is read-only`,
+              },
+            });
           return;
         }
         await readBody(req).catch(() => Buffer.alloc(0)); // extended MKCOL body unsupported in v1
         const lst = await fsp.lstat(abs).catch(() => null);
         if (lst) {
-          res.status(405).json({ error: { code: "already_exists", message: rel } });
+          res
+            .status(405)
+            .json({ error: { code: "already_exists", message: rel } });
           return;
         }
         try {
           await fss.mkdir({ path: abs });
         } catch (e) {
-          res.status(403).json({ error: { code: "permission_denied", message: (e as Error).message } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: (e as Error).message,
+              },
+            });
           return;
         }
         res.status(201).end();
@@ -428,18 +605,36 @@ export function createWebDavRouter(opts: {
       }
       case "DELETE": {
         if (share.readOnly) {
-          res.status(403).json({ error: { code: "permission_denied", message: `share ${share.name} is read-only` } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: `share ${share.name} is read-only`,
+              },
+            });
           return;
         }
         if (!(await confinedAbs(share.path, abs))) {
-          res.status(403).json({ error: { code: "permission_denied", message: "symlink target outside share" } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: "symlink target outside share",
+              },
+            });
           return;
         }
         try {
           await fss.remove({ path: abs, recursive: true });
         } catch (e) {
           const code = (e as { code?: string }).code;
-          res.status(code === "not_found" ? 404 : 403).json({ error: { code: code ?? "unknown", message: (e as Error).message } });
+          res
+            .status(code === "not_found" ? 404 : 403)
+            .json({
+              error: { code: code ?? "unknown", message: (e as Error).message },
+            });
           return;
         }
         res.status(204).end();
@@ -447,29 +642,69 @@ export function createWebDavRouter(opts: {
       }
       case "MOVE":
       case "COPY": {
-        const dest = parseDestination(req.headers.destination as string | undefined);
+        const dest = parseDestination(
+          req.headers.destination as string | undefined,
+        );
         const destShare = dest ? byName.get(dest.shareName) : undefined;
         if (!dest || !destShare) {
-          res.status(400).json({ error: { code: "invalid_path", message: "Destination header must be a /dav/<share>/... URL" } });
+          res
+            .status(400)
+            .json({
+              error: {
+                code: "invalid_path",
+                message: "Destination header must be a /dav/<share>/... URL",
+              },
+            });
           return;
         }
         if (share.readOnly || (method === "COPY" && destShare.readOnly)) {
-          res.status(403).json({ error: { code: "permission_denied", message: "share is read-only" } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: "share is read-only",
+              },
+            });
           return;
         }
         if (method === "MOVE" && destShare.readOnly) {
-          res.status(403).json({ error: { code: "permission_denied", message: `share ${destShare.name} is read-only` } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: `share ${destShare.name} is read-only`,
+              },
+            });
           return;
         }
         let destAbs: string;
         try {
           destAbs = resolveSharePath(destShare.path, dest.subPath);
         } catch {
-          res.status(403).json({ error: { code: "permission_denied", message: "destination escapes share root" } });
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: "destination escapes share root",
+              },
+            });
           return;
         }
-        if (!(await confinedAbs(share.path, abs)) || !(await confinedAbs(destShare.path, destAbs))) {
-          res.status(403).json({ error: { code: "permission_denied", message: "symlink target outside share" } });
+        if (
+          !(await confinedAbs(share.path, abs)) ||
+          !(await confinedAbs(destShare.path, destAbs))
+        ) {
+          res
+            .status(403)
+            .json({
+              error: {
+                code: "permission_denied",
+                message: "symlink target outside share",
+              },
+            });
           return;
         }
         const srcLst = await fsp.lstat(abs).catch(() => null);
@@ -477,10 +712,23 @@ export function createWebDavRouter(opts: {
           res.status(404).json({ error: { code: "not_found", message: rel } });
           return;
         }
-        const overwrite = ((req.headers.overwrite as string | undefined) ?? "T").trim().toUpperCase() !== "F";
-        const destExists = await fsp.lstat(destAbs).then(() => true, () => false);
+        const overwrite =
+          ((req.headers.overwrite as string | undefined) ?? "T")
+            .trim()
+            .toUpperCase() !== "F";
+        const destExists = await fsp.lstat(destAbs).then(
+          () => true,
+          () => false,
+        );
         if (destExists && !overwrite) {
-          res.status(412).json({ error: { code: "precondition_failed", message: "destination exists and Overwrite: F" } });
+          res
+            .status(412)
+            .json({
+              error: {
+                code: "precondition_failed",
+                message: "destination exists and Overwrite: F",
+              },
+            });
           return;
         }
         try {
@@ -492,10 +740,21 @@ export function createWebDavRouter(opts: {
         } catch (e) {
           const code = (e as { code?: string }).code;
           if (code === "already_exists") {
-            res.status(412).json({ error: { code: "precondition_failed", message: (e as Error).message } });
+            res
+              .status(412)
+              .json({
+                error: {
+                  code: "precondition_failed",
+                  message: (e as Error).message,
+                },
+              });
             return;
           }
-          res.status(code === "not_found" ? 404 : 403).json({ error: { code: code ?? "unknown", message: (e as Error).message } });
+          res
+            .status(code === "not_found" ? 404 : 403)
+            .json({
+              error: { code: code ?? "unknown", message: (e as Error).message },
+            });
           return;
         }
         res.status(destExists ? 204 : 201).end();
@@ -527,7 +786,11 @@ export function createWebDavRouter(opts: {
           res.status(404).json({ error: { code: "not_found", message: rel } });
           return;
         }
-        return fakeLock(req, res, davHref(share.name, relSub, lst.isDirectory()));
+        return fakeLock(
+          req,
+          res,
+          davHref(share.name, relSub, lst.isDirectory()),
+        );
       }
       case "UNLOCK": {
         res.status(204).end();
@@ -541,7 +804,11 @@ export function createWebDavRouter(opts: {
   }
 
   /** Fake exclusive write lock — v1 is single-writer, so always succeed. */
-  function fakeLock(_req: express.Request, res: express.Response, href: string): void {
+  function fakeLock(
+    _req: express.Request,
+    res: express.Response,
+    href: string,
+  ): void {
     const token = `opaquelocktoken:${crypto.randomUUID()}`;
     res.setHeader("Lock-Token", `<${token}>`);
     res
@@ -623,7 +890,12 @@ export function createWebDavRouter(opts: {
     if (depth >= maxDepth || budget.left <= 0) return [];
     let listing: { entries: { name: string }[] };
     try {
-      listing = await fss.browse({ path: dirAbs, includeHidden: true, limit: 5000, offset: 0 });
+      listing = await fss.browse({
+        path: dirAbs,
+        includeHidden: true,
+        limit: 5000,
+        offset: 0,
+      });
     } catch {
       return [];
     }
@@ -638,7 +910,17 @@ export function createWebDavRouter(opts: {
       out.push(r);
       // never descend into symlinks; only real dirs, and only for infinity
       if (r.isCollection && !lst.isSymbolicLink() && maxDepth === Infinity) {
-        out.push(...(await collectChildren(childAbs, childRel, hrefBase, root, maxDepth, depth + 1, budget)));
+        out.push(
+          ...(await collectChildren(
+            childAbs,
+            childRel,
+            hrefBase,
+            root,
+            maxDepth,
+            depth + 1,
+            budget,
+          )),
+        );
       }
     }
     return out;

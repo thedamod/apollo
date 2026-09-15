@@ -23,18 +23,35 @@ const shares: WebDavShare[] = [
   { name: "ro", path: "", readOnly: true },
 ];
 
-function authHeaders(kind: "bearer" | "basic" | "query" | "none" = "bearer"): Record<string, string> {
+function authHeaders(
+  kind: "bearer" | "basic" | "query" | "none" = "bearer",
+): Record<string, string> {
   if (kind === "bearer") return { authorization: `Bearer ${TOKEN}` };
-  if (kind === "basic") return { authorization: `Basic ${Buffer.from(`finder:${TOKEN}`).toString("base64")}` };
+  if (kind === "basic")
+    return {
+      authorization: `Basic ${Buffer.from(`finder:${TOKEN}`).toString("base64")}`,
+    };
   return {};
 }
 
-async function dav(method: string, p: string, init: RequestInit & { auth?: "bearer" | "basic" | "query" | "none" } = {}) {
+async function dav(
+  method: string,
+  p: string,
+  init: RequestInit & { auth?: "bearer" | "basic" | "query" | "none" } = {},
+) {
   const { auth = "bearer", headers: extraHeaders, ...rest } = init;
   const sep = p.includes("?") ? "&" : "?";
-  const url = auth === "query" ? `${baseUrl}${p}${sep}token=${TOKEN}` : `${baseUrl}${p}`;
+  const url =
+    auth === "query" ? `${baseUrl}${p}${sep}token=${TOKEN}` : `${baseUrl}${p}`;
   const base = auth === "query" || auth === "none" ? {} : authHeaders(auth);
-  return fetch(url, { method, ...rest, headers: { ...base, ...(extraHeaders as Record<string, string> | undefined) } });
+  return fetch(url, {
+    method,
+    ...rest,
+    headers: {
+      ...base,
+      ...(extraHeaders as Record<string, string> | undefined),
+    },
+  });
 }
 
 beforeAll(async () => {
@@ -50,7 +67,14 @@ beforeAll(async () => {
   shares[1]!.path = roDir;
 
   const app = express();
-  app.use("/dav", createWebDavRouter({ token: TOKEN, filesystemService: fss, getShares: () => shares }));
+  app.use(
+    "/dav",
+    createWebDavRouter({
+      token: TOKEN,
+      filesystemService: fss,
+      getShares: () => shares,
+    }),
+  );
   server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address() as { port: number };
@@ -64,14 +88,22 @@ afterAll(async () => {
 
 describe("webdav auth", () => {
   it("rejects unauthenticated requests with Basic challenge", async () => {
-    const res = await dav("PROPFIND", "/dav/", { auth: "none", headers: { Depth: "0" } });
+    const res = await dav("PROPFIND", "/dav/", {
+      auth: "none",
+      headers: { Depth: "0" },
+    });
     expect(res.status).toBe(401);
-    expect(res.headers.get("www-authenticate")).toContain('Basic realm="home server"');
+    expect(res.headers.get("www-authenticate")).toContain(
+      'Basic realm="home server"',
+    );
   });
 
   it("accepts Bearer, Basic (user ignored), and ?token= fallback", async () => {
     for (const auth of ["bearer", "basic", "query"] as const) {
-      const res = await dav("PROPFIND", "/dav/", { auth, headers: { Depth: "0" } });
+      const res = await dav("PROPFIND", "/dav/", {
+        auth,
+        headers: { Depth: "0" },
+      });
       expect(res.status).toBe(207);
     }
   });
@@ -79,7 +111,10 @@ describe("webdav auth", () => {
   it("rejects wrong Basic password", async () => {
     const res = await fetch(`${baseUrl}/dav/`, {
       method: "PROPFIND",
-      headers: { authorization: `Basic ${Buffer.from("finder:wrong").toString("base64")}`, Depth: "0" },
+      headers: {
+        authorization: `Basic ${Buffer.from("finder:wrong").toString("base64")}`,
+        Depth: "0",
+      },
     });
     expect(res.status).toBe(401);
   });
@@ -103,7 +138,9 @@ describe("webdav browse (finder connect/open probes)", () => {
   });
 
   it("PROPFIND depth 1 on share lists children (finder open)", async () => {
-    const res = await dav("PROPFIND", "/dav/media/", { headers: { Depth: "1" } });
+    const res = await dav("PROPFIND", "/dav/media/", {
+      headers: { Depth: "1" },
+    });
     expect(res.status).toBe(207);
     const xml = await res.text();
     expect(xml).toContain("hello.txt");
@@ -111,13 +148,17 @@ describe("webdav browse (finder connect/open probes)", () => {
   });
 
   it("PROPFIND infinity recurses", async () => {
-    const res = await dav("PROPFIND", "/dav/media/", { headers: { Depth: "infinity" } });
+    const res = await dav("PROPFIND", "/dav/media/", {
+      headers: { Depth: "infinity" },
+    });
     expect(res.status).toBe(207);
     expect(await res.text()).toContain("nested.txt");
   });
 
   it("PROPFIND missing path is 404", async () => {
-    const res = await dav("PROPFIND", "/dav/media/nope.txt", { headers: { Depth: "0" } });
+    const res = await dav("PROPFIND", "/dav/media/nope.txt", {
+      headers: { Depth: "0" },
+    });
     expect(res.status).toBe(404);
   });
 });
@@ -133,7 +174,9 @@ describe("webdav file transfer", () => {
   });
 
   it("GET range returns 206", async () => {
-    const res = await dav("GET", "/dav/media/hello.txt", { headers: { Range: "bytes=0-4" } });
+    const res = await dav("GET", "/dav/media/hello.txt", {
+      headers: { Range: "bytes=0-4" },
+    });
     expect(res.status).toBe(206);
     expect(await res.text()).toBe("hello");
   });
@@ -155,7 +198,9 @@ describe("webdav writes", () => {
   it("PUT creates parent dirs, MKCOL + DELETE round-trip", async () => {
     const put = await dav("PUT", "/dav/media/newdir/a.txt", { body: "data" });
     expect([201, 204]).toContain(put.status);
-    expect(await (await dav("GET", "/dav/media/newdir/a.txt")).text()).toBe("data");
+    expect(await (await dav("GET", "/dav/media/newdir/a.txt")).text()).toBe(
+      "data",
+    );
 
     const mk = await dav("MKCOL", "/dav/media/emptydir");
     expect(mk.status).toBe(201);
@@ -184,7 +229,10 @@ describe("webdav writes", () => {
 
   it("COPY with Overwrite: F on existing destination is 412", async () => {
     const res = await dav("COPY", "/dav/media/moved.txt", {
-      headers: { Destination: `${baseUrl}/dav/media/copied.txt`, Overwrite: "F" },
+      headers: {
+        Destination: `${baseUrl}/dav/media/copied.txt`,
+        Overwrite: "F",
+      },
     });
     expect(res.status).toBe(412);
   });
@@ -208,7 +256,9 @@ describe("webdav read-only shares", () => {
     expect((await dav("PUT", "/dav/ro/a.txt", { body: "x" })).status).toBe(403);
     expect((await dav("MKCOL", "/dav/ro/d")).status).toBe(403);
     expect((await dav("DELETE", "/dav/ro/")).status).toBe(403);
-    expect((await dav("PROPFIND", "/dav/ro/", { headers: { Depth: "0" } })).status).toBe(207);
+    expect(
+      (await dav("PROPFIND", "/dav/ro/", { headers: { Depth: "0" } })).status,
+    ).toBe(207);
   });
 });
 
@@ -222,8 +272,12 @@ describe("webdav confinement", () => {
   it("symlink pointing outside the share is listed but not served", async () => {
     const outside = path.join(root, "secret.txt");
     await fsp.writeFile(outside, "secret");
-    await fsp.symlink(outside, path.join(mediaDir, "evil-link")).catch(() => {});
-    const list = await dav("PROPFIND", "/dav/media/", { headers: { Depth: "1" } });
+    await fsp
+      .symlink(outside, path.join(mediaDir, "evil-link"))
+      .catch(() => {});
+    const list = await dav("PROPFIND", "/dav/media/", {
+      headers: { Depth: "1" },
+    });
     expect(await list.text()).toContain("evil-link");
     expect((await dav("GET", "/dav/media/evil-link")).status).toBe(403);
   });
@@ -236,7 +290,9 @@ describe("filesystem copy", () => {
     await fsp.writeFile(from, "copy me");
     await fss.copy({ from, to });
     expect(await fsp.readFile(to, "utf8")).toBe("copy me");
-    await expect(fss.copy({ from, to })).rejects.toMatchObject({ code: "already_exists" });
+    await expect(fss.copy({ from, to })).rejects.toMatchObject({
+      code: "already_exists",
+    });
     await fss.copy({ from, to, overwrite: true });
   });
 
@@ -246,6 +302,8 @@ describe("filesystem copy", () => {
     await fsp.writeFile(path.join(srcDir, "inner", "f.txt"), "deep");
     const dstDir = path.join(root, "copytree2");
     await fss.copy({ from: srcDir, to: dstDir });
-    expect(await fsp.readFile(path.join(dstDir, "inner", "f.txt"), "utf8")).toBe("deep");
+    expect(
+      await fsp.readFile(path.join(dstDir, "inner", "f.txt"), "utf8"),
+    ).toBe("deep");
   });
 });

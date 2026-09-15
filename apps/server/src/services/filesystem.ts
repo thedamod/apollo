@@ -137,8 +137,21 @@ export class FilesystemServiceTag extends Context.Tag("home-server/FilesystemSer
     readonly mkdir: (input: FilesystemMkdirInput) => Effect.Effect<FilesystemMkdirResult, FilesystemError>;
     readonly rename: (input: FilesystemRenameInput) => Effect.Effect<FilesystemRenameResult, FilesystemError>;
     readonly remove: (input: FilesystemDeleteInput) => Effect.Effect<FilesystemDeleteResult, FilesystemError>;
+    readonly copy: (input: FilesystemCopyInput) => Effect.Effect<FilesystemCopyResult, FilesystemError>;
   }
 >() {}
+
+/** Input for recursive copy (used by WebDAV COPY). Paths are absolute. */
+export interface FilesystemCopyInput {
+  from: string;
+  to: string;
+  overwrite?: boolean;
+}
+
+export interface FilesystemCopyResult {
+  from: string;
+  to: string;
+}
 
 // ---------------------------------------------------------------------------
 // Core Effect implementation
@@ -347,6 +360,24 @@ function toErrno(e: unknown, target: string): FilesystemError {
 export function resolveUserPath(rawPath: string, cwd: string | undefined): string {
   const home = os.homedir();
   return resolveTarget(rawPath ?? "", cwd, home);
+}
+
+/**
+ * Resolve a WebDAV sub-path inside a share root. Rejects traversal
+ * outside the share (returns an invalid_path error). Never follows
+ * symlinks — callers lstat, never stat, before acting.
+ */
+export function resolveSharePath(sharePath: string, subPath: string): string {
+  const root = path.resolve(sharePath);
+  // strip leading slashes so path.resolve doesn't treat subPath as absolute
+  const rel = (subPath ?? "").replace(/^\/+/, "");
+  const resolved = path.resolve(root, rel);
+  const same = resolved === root;
+  const inside = resolved.startsWith(root + path.sep);
+  if (!same && !inside) {
+    throw new FilesystemInvalidPathError({ path: subPath, reason: "path escapes share root" });
+  }
+  return resolved;
 }
 
 function guardWindowsPath(rawPath: string): Effect.Effect<void, FilesystemError> {
@@ -581,6 +612,76 @@ function deleteEffectInternal(input: FilesystemDeleteInput): Effect.Effect<Files
   });
 }
 
+async function copyRecursive(src: string, dst: string): Promise<void> {
+  const st = await fsp.lstat(src);
+  if (st.isSymbolicLink()) {
+    // copy the link itself, never follow it (stays inside the share)
+    const target = await fsp.readlink(src);
+    await fsp.mkdir(path.dirname(dst), { recursive: true });
+    try {
+      await fsp.unlink(dst);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e;
+    }
+    await fsp.symlink(target, dst);
+    return;
+  }
+  if (st.isDirectory()) {
+    await fsp.mkdir(dst, { recursive: true });
+    const names = await fsp.readdir(src);
+    for (const name of names) {
+      await copyRecursive(path.join(src, name), path.join(dst, name));
+    }
+    return;
+  }
+  await fsp.mkdir(path.dirname(dst), { recursive: true });
+  await fsp.copyFile(src, dst);
+}
+
+function copyEffectInternal(input: FilesystemCopyInput): Effect.Effect<FilesystemCopyResult, FilesystemError> {
+  return Effect.gen(function* () {
+    const fromRaw = (input.from ?? "").trim();
+    const toRaw = (input.to ?? "").trim();
+    if (!fromRaw || !toRaw) {
+      return yield* Effect.fail(
+        new FilesystemInvalidPathError({ path: !fromRaw ? input.from : input.to, reason: "empty" }),
+      );
+    }
+    const from = path.resolve(fromRaw);
+    const to = path.resolve(toRaw);
+    if (from === to) return { from, to };
+    yield* Effect.tryPromise({
+      try: () => fsp.lstat(from),
+      catch: (cause) => toErrno(cause, from),
+    });
+    if (!input.overwrite) {
+      const exists = yield* Effect.tryPromise({
+        try: () =>
+          fsp.lstat(to).then(
+            () => true as const,
+            (e: unknown) => {
+              if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return false as const;
+              throw e;
+            },
+          ),
+        catch: (cause) => toErrno(cause, to),
+      }).pipe(
+        Effect.catchAll((cause) =>
+          (cause as unknown as NodeJS.ErrnoException)?.code === "ENOENT"
+            ? Effect.succeed(false as const)
+            : Effect.fail(toErrno(cause, to)),
+        ),
+      );
+      if (exists) return yield* Effect.fail(new FilesystemAlreadyExistsError({ path: to }));
+    }
+    yield* Effect.tryPromise({
+      try: () => copyRecursive(from, to),
+      catch: (cause) => toErrno(cause, to),
+    });
+    return { from, to };
+  });
+}
+
 export const FilesystemServiceLive = Layer.succeed(
   FilesystemServiceTag,
   FilesystemServiceTag.of({
@@ -590,6 +691,7 @@ export const FilesystemServiceLive = Layer.succeed(
     mkdir: mkdirEffectInternal,
     rename: renameEffectInternal,
     remove: deleteEffectInternal,
+    copy: copyEffectInternal,
   }),
 );
 
@@ -623,6 +725,10 @@ export class FilesystemService {
 
   removeEffect(input: FilesystemDeleteInput): Effect.Effect<FilesystemDeleteResult, FilesystemError> {
     return deleteEffectInternal(input);
+  }
+
+  copyEffect(input: FilesystemCopyInput): Effect.Effect<FilesystemCopyResult, FilesystemError> {
+    return copyEffectInternal(input);
   }
 
   private async run<E, A>(effect: Effect.Effect<A, E>): Promise<A> {
@@ -664,6 +770,10 @@ export class FilesystemService {
 
   async remove(input: FilesystemDeleteInput): Promise<FilesystemDeleteResult> {
     return this.run(this.removeEffect(input));
+  }
+
+  async copy(input: FilesystemCopyInput): Promise<FilesystemCopyResult> {
+    return this.run(this.copyEffect(input));
   }
 
   async search(): Promise<FilesystemEntry[]> {

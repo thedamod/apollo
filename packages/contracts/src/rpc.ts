@@ -45,6 +45,13 @@ import {
   ScriptRun,
 } from "./scripts.ts";
 import {
+  WidgetListInput,
+  WidgetGetInput,
+  WidgetDefinition,
+  WidgetUpsertInput,
+  WidgetDeleteInput,
+} from "./widgets.ts";
+import {
   ServiceListInput,
   ServiceGetInput,
   ServiceDefinition,
@@ -103,6 +110,12 @@ export const RpcMethod = {
   scriptsLogs: "scripts.logs",
   scriptsRuns: "scripts.runs",
   scriptsGetRun: "scripts.getRun",
+
+  // widgets (pinned script shortcuts on Home)
+  widgetsList: "widgets.list",
+  widgetsGet: "widgets.get",
+  widgetsUpsert: "widgets.upsert",
+  widgetsDelete: "widgets.delete",
 
   // services (long-running, e.g. jellyfin) — supervised
   servicesList: "services.list",
@@ -232,6 +245,16 @@ export const RpcSchemas = {
     output: z.array(ScriptRun),
   },
   [RpcMethod.scriptsGetRun]: { input: ScriptGetRunInput, output: ScriptRun },
+  [RpcMethod.widgetsList]: {
+    input: WidgetListInput ?? z.object({}),
+    output: z.array(WidgetDefinition),
+  },
+  [RpcMethod.widgetsGet]: { input: WidgetGetInput, output: WidgetDefinition },
+  [RpcMethod.widgetsUpsert]: {
+    input: WidgetUpsertInput,
+    output: WidgetDefinition,
+  },
+  [RpcMethod.widgetsDelete]: { input: WidgetDeleteInput, output: z.void() },
   [RpcMethod.servicesList]: {
     input: ServiceListInput ?? z.object({}),
     output: z.array(ServiceInstance),

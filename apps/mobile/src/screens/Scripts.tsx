@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { Plus } from "lucide-react-native";
+import { ChevronRight, Plus } from "lucide-react-native";
 import { theme } from "../theme";
 import type { RpcClient } from "../lib/client";
 import { Card } from "../components/Card";
@@ -14,7 +14,6 @@ interface ScriptDef {
   name: string;
   command: string;
   description?: string;
-  icon?: string;
   cwd?: string;
   runMode?: string;
   params?: ScriptParam[];
@@ -70,12 +69,10 @@ export function ScriptsScreen({ client }: { client: RpcClient | null }) {
       {error ? <Text style={styles.error}>{error}</Text> : null}
       <ScrollView contentContainerStyle={{ gap: 8, paddingVertical: 12 }}>
         {scripts.map((s) => (
-          <Card key={s.id} onPress={() => setRunning({ id: s.id, name: s.name, description: s.description, icon: s.icon, command: s.command, params: s.params })}>
+          <Card key={s.id} onPress={() => setRunning({ id: s.id, name: s.name, description: s.description, command: s.command, params: s.params })}>
             <View style={styles.row}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.name}>
-                  {s.icon ? `${s.icon} ` : ""}{s.name}
-                </Text>
+                <Text style={styles.name}>{s.name}</Text>
                 <Text style={styles.cmd} numberOfLines={2}>
                   {s.description || s.command}
                 </Text>
@@ -83,7 +80,7 @@ export function ScriptsScreen({ client }: { client: RpcClient | null }) {
                   <Text style={styles.inputs}>{s.params!.length} input{s.params!.length === 1 ? "" : "s"}</Text>
                 ) : null}
               </View>
-              <Text style={styles.chev}>›</Text>
+              <ChevronRight size={18} color={theme.colors.chevron} />
             </View>
           </Card>
         ))}
@@ -104,7 +101,6 @@ const styles = StyleSheet.create({
   name: { color: theme.colors.foreground, fontSize: 16, fontFamily: theme.font.bold },
   cmd: { color: theme.colors.secondary, fontSize: 13, fontFamily: theme.font.regular, marginTop: 4 },
   inputs: { color: theme.colors.muted, fontSize: 12, fontFamily: theme.font.medium, marginTop: 4 },
-  chev: { color: theme.colors.chevron, fontSize: 22, fontFamily: theme.font.regular },
   error: { color: theme.colors.danger, fontFamily: theme.font.regular, marginTop: 8 },
   empty: { color: theme.colors.muted, fontFamily: theme.font.regular, marginTop: 16 },
 });

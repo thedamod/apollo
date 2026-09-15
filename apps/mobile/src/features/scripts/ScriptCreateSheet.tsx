@@ -3,14 +3,13 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Plus } from "lucide-react-native";
 import { theme } from "../../theme";
 import type { RpcClient } from "../../lib/client";
-import { ChipRow, EnvEditor, Segmented, Sheet, TextField, ToggleRow, WizardNav, slugify } from "../../components/Form";
+import { EnvEditor, Segmented, Sheet, TextField, ToggleRow, WizardNav, slugify } from "../../components/Form";
 import { SCRIPT_TEMPLATES } from "./scriptTemplates";
 import type { ParamValues, ScriptParam } from "./params";
 import { defaultParamValues, referencedParamKeys } from "./params";
 import { ParamFields } from "./ParamFields";
 import { ParamEditor, ParamRow } from "./ParamEditor";
 
-const ICONS = ["", "💾", "🐳", "🧹", "🔄", "📊", "🌙", "⚙️", "💡"];
 const STEPS = ["Basic", "Command", "Parameters", "Schedule", "Advanced"];
 
 type Mode = "manual" | "scheduled" | "both";
@@ -39,7 +38,6 @@ export function ScriptCreateSheet({
   const [templateId, setTemplateId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [icon, setIcon] = useState("");
   const [command, setCommand] = useState("");
   const [cwd, setCwd] = useState("");
   const [runUser, setRunUser] = useState("");
@@ -60,7 +58,6 @@ export function ScriptCreateSheet({
     setTemplateId(null);
     setName("");
     setDescription("");
-    setIcon("");
     setCommand("");
     setCwd("");
     setRunUser("");
@@ -83,7 +80,6 @@ export function ScriptCreateSheet({
     if (!t) return;
     setName(t.name);
     setDescription(t.description);
-    setIcon(t.icon);
     setCommand(t.command);
     setCwd(t.cwd ?? "");
     setMode(t.runMode);
@@ -124,7 +120,6 @@ export function ScriptCreateSheet({
         id: slugify(name, `scr_${Date.now().toString(36)}`),
         name: name.trim(),
         description: description.trim() || undefined,
-        icon: icon || undefined,
         command: command.trim(),
         cwd: cwd.trim() || undefined,
         env: envClean,
@@ -157,16 +152,13 @@ export function ScriptCreateSheet({
               </Pressable>
               {SCRIPT_TEMPLATES.map((t) => (
                 <Pressable key={t.id} onPress={() => applyTemplate(t.id)} style={[styles.chip, templateId === t.id && styles.chipActive]}>
-                  <Text style={styles.chipLabel}>
-                    {t.icon} {t.name}
-                  </Text>
+                  <Text style={styles.chipLabel}>{t.name}</Text>
                 </Pressable>
               ))}
             </View>
           </View>
           <TextField label="Name" value={name} onChange={setName} placeholder="Nightly backup" autoCapitalize="words" />
           <TextField label="Description" value={description} onChange={setDescription} placeholder="What does it do?" autoCapitalize="sentences" />
-          <ChipRow label="Icon" options={ICONS} value={icon} onChange={setIcon} />
         </>
       ) : null}
       {step === 1 ? (

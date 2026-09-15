@@ -74,6 +74,47 @@ State lives in `~/.home-server/userdata` (or `$HOME_SERVER_HOME`): `secrets/toke
 
 Health check: `GET /health`. WebSocket: `ws://<host>:<port>/ws?token=<token>` (token in query because RN WebSocket has no custom headers).
 
+## Files in Finder / Explorer / VLC (WebDAV)
+
+The server exposes your files as a standard WebDAV share at `/dav` — no SMB,
+no SFTP daemon, no new port. It is an additive view over the same
+`FilesystemService` as the RPC/API, so Finder, File Explorer, Nautilus, and
+VLC all see the same files. Works over plain LAN and over Tailscale HTTPS.
+
+Default shares: `media` → `~/media` and `home` → `~` (both read-write).
+Override with env:
+
+```bash
+# name=path[:ro|:rw], comma-separated
+HOME_SERVER_SHARES="media=~/media:rw,docs=/data/docs:ro"
+```
+
+Auth: same token as everything else. Finder/Explorer can't send
+`Authorization: Bearer`, so use **Basic auth with any username and the token
+as the password** (or append `?token=<token>` to the URL).
+
+```bash
+home-server token   # prints the token to use as the WebDAV password
+```
+
+- **macOS Finder** — `⌘K` (Connect to Server), enter
+  `http://<host>:7070/dav` (or the `https://` tailnet URL), any username,
+  token as password. Drag-and-drop, Quick Look, and video seeking work.
+- **Windows Explorer** — right-click *This PC → Map network drive*, folder
+  `http://<host>:7070/dav` (check *Connect using different credentials*),
+  any username, token as password.
+- **VLC** — *Open Network Stream* → `http://<host>:7070/dav/media/movie.mkv`
+  (add `?token=<token>` if VLC won't prompt for credentials).
+- **curl probe** (what Finder sends on connect/open):
+  ```bash
+  curl -u x:$TOKEN -X PROPFIND -H 'Depth: 0' http://127.0.0.1:7070/dav/
+  curl -u x:$TOKEN -X PROPFIND -H 'Depth: 1' http://127.0.0.1:7070/dav/media/
+  ```
+
+Notes: read-only shares refuse PUT/MKCOL/DELETE/MOVE-into with `403`;
+symlinks are listed but never followed outside their share; `..` reversals
+are rejected; video seeking works via `Accept-Ranges: bytes`.
+
 ## Remote access (Tailscale)
 
 ```bash

@@ -16,6 +16,7 @@ export interface ServerConfig {
   logsDir: string;
   terminalLogsDir: string;
   scriptsPath: string;
+  widgetsPath: string;
   servicesPath: string;
   tokenPath: string;
   runtimeStatePath: string;
@@ -30,6 +31,7 @@ export interface DerivedPaths {
   logsDir: string;
   terminalLogsDir: string;
   scriptsPath: string;
+  widgetsPath: string;
   servicesPath: string;
   tokenPath: string;
   runtimeStatePath: string;
@@ -44,6 +46,7 @@ export function derivePaths(baseDir: string): DerivedPaths {
     logsDir,
     terminalLogsDir: path.join(logsDir, "terminals"),
     scriptsPath: path.join(dataDir, "scripts.json"),
+    widgetsPath: path.join(dataDir, "widgets.json"),
     servicesPath: path.join(dataDir, "services.json"),
     tokenPath: path.join(dataDir, "secrets", "token"),
     runtimeStatePath: path.join(dataDir, "server-runtime.json"),
@@ -85,6 +88,7 @@ export function loadOrCreateConfig(opts: {
     logsDir: d.logsDir,
     terminalLogsDir: d.terminalLogsDir,
     scriptsPath: d.scriptsPath,
+    widgetsPath: d.widgetsPath,
     servicesPath: d.servicesPath,
     tokenPath: d.tokenPath,
     runtimeStatePath: d.runtimeStatePath,
@@ -96,6 +100,75 @@ export function loadOrCreateConfig(opts: {
 
 export function getDefaultAllowedRoots(): string[] {
   return [os.homedir(), "/"];
+}
+
+// ---------------------------------------------------------------------------
+// WebDAV shares — additive view on top of the filesystem service.
+// No second file stack: /dav/<share>/<subpath> maps onto these roots.
+// ---------------------------------------------------------------------------
+
+export interface WebDavShare {
+  /** URL segment under /dav (e.g. "media" -> /dav/media/...) */
+  name: string;
+  /** Absolute filesystem root for this share */
+  path: string;
+  /** When true, PUT/MKCOL/DELETE/MOVE/COPY-into are refused with 403 */
+  readOnly: boolean;
+}
+
+function expandHome(p: string): string {
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/") || p.startsWith("~\\")) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+function isValidShareName(name: string): boolean {
+  return /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name);
+}
+
+/**
+ * Parse HOME_SERVER_SHARES env.
+ *
+ * Format: comma-separated `name=path[:ro|:rw]`, e.g.
+ *   HOME_SERVER_SHARES="media=~/media:rw,docs=/data/docs:ro"
+ * Mode defaults to rw. Entries with invalid names are skipped.
+ */
+export function parseWebDavShares(raw: string | undefined): WebDavShare[] | undefined {
+  if (!raw || !raw.trim()) return undefined;
+  const out: WebDavShare[] = [];
+  for (const part of raw.split(",")) {
+    const entry = part.trim();
+    if (!entry) continue;
+    const eq = entry.indexOf("=");
+    if (eq <= 0) continue;
+    const name = entry.slice(0, eq).trim();
+    let rest = entry.slice(eq + 1).trim();
+    if (!isValidShareName(name)) continue;
+    if (!rest) continue;
+    let readOnly = false;
+    const roSuffix = rest.match(/:(ro|rw)$/);
+    if (roSuffix) {
+      readOnly = roSuffix[1] === "ro";
+      rest = rest.slice(0, rest.length - 3).trim();
+      if (!rest) continue;
+    }
+    const resolved = path.resolve(expandHome(rest));
+    out.push({ name, path: resolved, readOnly });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * Shares exposed at /dav. Defaults: `media` -> ~/media (rw) and
+ * `home` -> ~ (rw). Override with HOME_SERVER_SHARES env.
+ */
+export function getWebDavShares(env = process.env): WebDavShare[] {
+  const fromEnv = parseWebDavShares(env.HOME_SERVER_SHARES);
+  if (fromEnv) return fromEnv;
+  return [
+    { name: "media", path: path.join(os.homedir(), "media"), readOnly: false },
+    { name: "home", path: os.homedir(), readOnly: false },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +220,7 @@ export function loadOrCreateConfigEffect(
       logsDir: d.logsDir,
       terminalLogsDir: d.terminalLogsDir,
       scriptsPath: d.scriptsPath,
+      widgetsPath: d.widgetsPath,
       servicesPath: d.servicesPath,
       tokenPath: d.tokenPath,
       runtimeStatePath: d.runtimeStatePath,

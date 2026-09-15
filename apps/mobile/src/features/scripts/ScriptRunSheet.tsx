@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
 import { Play } from "lucide-react-native";
 import { theme } from "../../theme";
 import type { RpcClient } from "../../lib/client";
-import { Sheet } from "../../components/Form";
+import { Sheet, TextField } from "../../components/Form";
 import { ParamFields } from "./ParamFields";
 import type { ParamValues, ScriptParam } from "./params";
 import { defaultParamValues, serializeParamValue, validateParamValues } from "./params";
@@ -12,7 +12,6 @@ export interface RunnableScript {
   id: string;
   name: string;
   description?: string;
-  icon?: string;
   command: string;
   params?: ScriptParam[];
 }
@@ -56,6 +55,9 @@ export function ScriptRunSheet({
   const [runError, setRunError] = useState<string | null>(null);
   const [history, setHistory] = useState<RunRow[]>([]);
   const [historyBusy, setHistoryBusy] = useState(false);
+  const [widgetName, setWidgetName] = useState("");
+  const [widgetBusy, setWidgetBusy] = useState(false);
+  const [widgetSaved, setWidgetSaved] = useState(false);
   const runIdRef = useRef<string | null>(null);
   const logScrollRef = useRef<ScrollView | null>(null);
 
@@ -70,6 +72,8 @@ export function ScriptRunSheet({
     setStartedAt(null);
     setFinishedAt(null);
     setRunError(null);
+    setWidgetName(script?.name ?? "");
+    setWidgetSaved(false);
     runIdRef.current = null;
     if (script && client) {
       setHistoryBusy(true);
@@ -148,6 +152,29 @@ export function ScriptRunSheet({
     }
   }
 
+  async function saveWidget() {
+    if (!script || !client || widgetBusy) return;
+    const errs = validateParamValues(params, values);
+    setErrors(errs);
+    if (Object.keys(errs).length > 0) return;
+    const name = widgetName.trim() || script.name;
+    setWidgetBusy(true);
+    setRunError(null);
+    try {
+      await client.call("widgets.upsert", { name, scriptId: script.id, params: values });
+      setWidgetSaved(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setRunError(
+        /unknown method/i.test(msg)
+          ? "Home shortcuts need a newer server — rebuild and restart the daemon, then try again."
+          : msg,
+      );
+    } finally {
+      setWidgetBusy(false);
+    }
+  }
+
   async function viewLogs(runId: string) {
     if (!client) return;
     try {
@@ -163,7 +190,7 @@ export function ScriptRunSheet({
   return (
     <Sheet
       visible={script !== null}
-      title={script ? `${script.icon ? `${script.icon} ` : ""}${script.name}` : ""}
+      title={script ? script.name : ""}
       stepLabel={script?.description || undefined}
       onClose={onClose}
     >
@@ -189,6 +216,23 @@ export function ScriptRunSheet({
         </View>
       ) : null}
       {runError ? <Text style={styles.error}>{runError}</Text> : null}
+      <View>
+        <Text style={styles.section}>Home shortcut</Text>
+        <Text style={styles.muted}>Pin the current values as a one-tap widget, e.g. Dim lights.</Text>
+        <View style={styles.widgetRow}>
+          <View style={{ flex: 1 }}>
+            <TextField label="Widget name" value={widgetName} onChange={(v) => { setWidgetName(v); setWidgetSaved(false); }} placeholder={script?.name ?? "Widget name"} />
+          </View>
+          <Pressable onPress={() => void saveWidget()} disabled={widgetBusy} style={[styles.widgetBtn, widgetBusy && { opacity: 0.6 }]}>
+            {widgetBusy ? (
+              <ActivityIndicator color={theme.colors.foreground} size="small" />
+            ) : (
+              <Text style={styles.widgetBtnLabel}>{widgetSaved ? "Saved" : "Add"}</Text>
+            )}
+          </Pressable>
+        </View>
+        {widgetSaved ? <Text style={styles.saved}>Pinned to Home.</Text> : null}
+      </View>
       {output ? (
         <View>
           <Text style={styles.section}>Output</Text>
@@ -251,4 +295,8 @@ const styles = StyleSheet.create({
   logText: { color: theme.colors.foreground, fontFamily: theme.font.regular, fontSize: 12 },
   histRow: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: theme.colors.cardAlt, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 9 },
   histText: { color: theme.colors.secondary, fontSize: 12, fontFamily: theme.font.regular },
+  widgetRow: { flexDirection: "row", alignItems: "flex-end", gap: 8, marginTop: 6 },
+  widgetBtn: { backgroundColor: theme.colors.cardAlt, borderRadius: 999, paddingHorizontal: 18, paddingVertical: 12, marginBottom: 2 },
+  widgetBtnLabel: { color: theme.colors.foreground, fontFamily: theme.font.medium, fontSize: 14 },
+  saved: { color: theme.colors.dotOnline, fontFamily: theme.font.regular, fontSize: 13, marginTop: 4 },
 });

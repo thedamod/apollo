@@ -8,6 +8,8 @@ import { mimeHintFromExt, extOf } from "@home-server/shared/path";
 import { resolveUserPath } from "./services/filesystem.ts";
 import { verifyToken, createPairingToken, consumePairingToken, getPairingTokenFromUrl, pairingUrlFromConfig } from "./auth.ts";
 import type { ServerConfig } from "./config.ts";
+import { getWebDavShares } from "./config.ts";
+import { createWebDavRouter, ensureWebDavShareDirs } from "./webdav.ts";
 import { logger } from "./logger.ts";
 import type { SystemService } from "./services/system.ts";
 import type { FilesystemService } from "./services/filesystem.ts";
@@ -51,6 +53,15 @@ export function createHttpApp(opts: {
     }
     return res.json({ token: opts.token });
   });
+
+  // WebDAV mount (additive view over FilesystemService, same token auth).
+  // No new port: served on the existing HTTP(S) listener behind Tailscale.
+  const davShares = getWebDavShares();
+  ensureWebDavShareDirs(davShares);
+  app.use(
+    "/dav",
+    createWebDavRouter({ token: opts.token, filesystemService: opts.filesystemService, getShares: getWebDavShares }),
+  );
 
   // auth middleware for /api/*
   app.use("/api", (req, res, next) => {
@@ -246,6 +257,9 @@ export function createHttpApp(opts: {
       host: opts.config.host,
       baseDir: opts.config.baseDir,
       tailscaleServeEnabled: opts.config.tailscaleServeEnabled,
+      davEnabled: true,
+      davPath: "/dav",
+      davShares: davShares.map((s) => ({ name: s.name, readOnly: s.readOnly })),
     });
   });
 
